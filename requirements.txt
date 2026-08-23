@@ -8,7 +8,6 @@ pydantic-settings==2.6.1
 
 # Reddit Integration
 praw==7.7.1
-asyncpraw==7.7.1
 
 # LLM / AI
 openai==1.54.0
@@ -16,43 +15,25 @@ langchain==0.3.7
 langchain-community==0.3.5
 langchain-openai==0.2.5
 langgraph==0.2.45
-sentence-transformers==3.2.1
-transformers==4.46.0
 
-# RAG / Vector Store
+# RAG / Vector Store - use lightweight alternatives
 chromadb==0.5.18
-pgvector==0.3.6
 
-# Database
+# Database - SQLite only for DO App Platform
 sqlalchemy==2.0.36
-alembic==1.14.0
-psycopg2-binary==2.9.10
-redis==5.2.0
 
-# Scheduling / Background Jobs
+# Scheduling
 apscheduler==3.10.4
-celery==5.4.0
 
 # HTTP / API
 httpx==0.27.2
-aiohttp==3.11.0
 requests==2.32.3
-
-# Monitoring / Observability
-prometheus-client==0.21.0
-structlog==24.4.0
 
 # Utilities
 python-dotenv==1.0.1
 tenacity==9.0.0
 pytz==2024.2
-email-validator==2.2.0
 
 # Testing
 pytest==8.3.3
 pytest-asyncio==0.24.0
-pytest-mock==3.14.0
-factory-boy==3.3.1
-
-# Deployment
-gunicorn==23.0.0
