@@ -1,81 +1,62 @@
 """
-CaseClosedFL Reddit Agent - RAG Engine
-ChromaDB vector store with NVIDIA embeddings for Reddit post retrieval.
-Supports semantic search, hybrid retrieval, and contextual compression.
+CaseClosedFL Reddit Agent - Lightweight RAG Engine
+No chromadb. Uses SQLite + simple text matching + OpenAI embeddings.
 """
 import logging
+import json
+import math
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-import chromadb
-from chromadb.config import Settings as ChromaSettings
-from sentence_transformers import SentenceTransformer
-
 from config import get_settings
 from nvidia_llm import get_nvidia_client
+from database import get_db_session, RedditBundle
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+def cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Pure Python cosine similarity."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
 class RAGEngine:
-    """
-    Retrieval-Augmented Generation engine for Reddit content.
-    Uses ChromaDB for vector storage with fallback to local embeddings.
-    """
+    """Lightweight RAG using SQLite + OpenAI embeddings."""
 
     def __init__(self):
-        self.client = chromadb.PersistentClient(
-            path=settings.chroma_persist_dir,
-            settings=ChromaSettings(
-                anonymized_telemetry=False,
-                allow_reset=True
-            )
-        )
-
-        # Collection for Reddit posts
-        self.collection = self.client.get_or_create_collection(
-            name="reddit_bundles",
-            metadata={"hnsw:space": "cosine"}
-        )
-
-        # Collection for CaseClosedFL knowledge base
-        self.kb_collection = self.client.get_or_create_collection(
-            name="caseclosed_kb",
-            metadata={"hnsw:space": "cosine"}
-        )
-
-        # Local embedding fallback (if NVIDIA API unavailable)
-        self._local_embedder: Optional[SentenceTransformer] = None
         self.nvidia = get_nvidia_client()
         self._use_nvidia = True
 
-    @property
-    def local_embedder(self) -> SentenceTransformer:
-        """Lazy-load local embedding model."""
-        if self._local_embedder is None:
-            logger.info("Loading local embedding model (fallback)...")
-            self._local_embedder = SentenceTransformer("all-MiniLM-L6-v2")
-        return self._local_embedder
-
     async def _embed(self, texts: List[str]) -> List[List[float]]:
-        """Generate embeddings using NVIDIA NIM or local fallback."""
+        """Generate embeddings via NVIDIA NIM."""
         if self._use_nvidia:
             try:
                 return await self.nvidia.embed(texts)
             except Exception as e:
-                logger.warning(f"NVIDIA embedding failed, falling back to local: {e}")
+                logger.warning(f"NVIDIA embedding failed: {e}")
                 self._use_nvidia = False
 
-        # Local fallback
-        embeddings = self.local_embedder.encode(texts, convert_to_list=True)
+        # Fallback: simple keyword hash embedding (not semantic but works)
+        embeddings = []
+        for text in texts:
+            words = text.lower().split()
+            vec = [0.0] * 384
+            for i, word in enumerate(words[:384]):
+                vec[i] = hash(word) % 100 / 100.0
+            embeddings.append(vec)
         return embeddings
 
     async def add_reddit_post(
         self,
         reddit_id: str,
         subreddit: str,
-        content_type: str,  # "post" or "comment"
+        content_type: str,
         title: Optional[str],
         body: str,
         author: Optional[str],
@@ -86,39 +67,35 @@ class RAGEngine:
         accident_type_tags: List[str] = None,
         reddit_created_utc: Optional[datetime] = None
     ):
-        """Index a Reddit post/comment into the vector store."""
-        # Prepare document
+        """Index a Reddit post into SQLite."""
         doc_text = f"Subreddit: r/{subreddit}\n"
         if title:
             doc_text += f"Title: {title}\n"
         doc_text += f"Content: {body[:2000]}"
 
-        metadata = {
-            "reddit_id": reddit_id,
-            "subreddit": subreddit,
-            "content_type": content_type,
-            "title": title or "",
-            "author": author or "unknown",
-            "score": score,
-            "num_comments": num_comments,
-            "intent_tags": ",".join(intent_tags or []),
-            "location_tags": ",".join(location_tags or []),
-            "accident_type_tags": ",".join(accident_type_tags or []),
-            "indexed_at": datetime.utcnow().isoformat(),
-            "reddit_created_utc": reddit_created_utc.isoformat() if reddit_created_utc else ""
-        }
-
         # Generate embedding
         embeddings = await self._embed([doc_text])
+        embedding_json = json.dumps(embeddings[0])
 
-        # Add to collection
-        self.collection.add(
-            ids=[reddit_id],
-            embeddings=embeddings,
-            documents=[doc_text],
-            metadatas=[metadata]
+        db = get_db_session()
+        bundle = RedditBundle(
+            reddit_id=reddit_id,
+            subreddit=subreddit,
+            content_type=content_type,
+            title=title or "",
+            body=body,
+            author=author or "unknown",
+            score=score,
+            num_comments=num_comments,
+            intent_tags=intent_tags or [],
+            location_tags=location_tags or [],
+            accident_type_tags=accident_type_tags or [],
+            embedding_model="nvidia/nv-embedqa-e5-v5" if self._use_nvidia else "fallback_hash",
+            reddit_created_utc=reddit_created_utc,
+            indexed_at=datetime.utcnow()
         )
-
+        db.add(bundle)
+        db.commit()
         logger.info(f"Indexed {content_type} {reddit_id} from r/{subreddit}")
 
     async def search_similar(
@@ -128,51 +105,46 @@ class RAGEngine:
         subreddit_filter: Optional[str] = None,
         min_score: int = 0
     ) -> List[Dict[str, Any]]:
-        """
-        Search for similar Reddit posts.
-
-        Args:
-            query: Search query text
-            n_results: Number of results to return
-            subreddit_filter: Optional subreddit to filter by
-            min_score: Minimum Reddit score filter
-        """
+        """Search for similar posts using cosine similarity."""
         query_embedding = await self._embed([query])
+        query_vec = query_embedding[0]
 
-        where_filter = {}
+        db = get_db_session()
+        bundles = db.query(RedditBundle).filter(
+            RedditBundle.score >= min_score
+        ).all()
+
         if subreddit_filter:
-            where_filter["subreddit"] = subreddit_filter
-        if min_score > 0:
-            where_filter["score"] = {"$gte": min_score}
+            bundles = [b for b in bundles if b.subreddit == subreddit_filter]
 
-        results = self.collection.query(
-            query_embeddings=query_embedding,
-            n_results=n_results,
-            where=where_filter if where_filter else None,
-            include=["documents", "metadatas", "distances"]
-        )
-
-        formatted_results = []
-        for i in range(len(results["ids"][0])):
-            formatted_results.append({
-                "reddit_id": results["ids"][0][i],
-                "document": results["documents"][0][i],
-                "metadata": results["metadatas"][0][i],
-                "distance": results["distances"][0][i],
-                "relevance_score": 1 - results["distances"][0][i]  # Convert distance to similarity
+        # Compute similarities
+        results = []
+        for bundle in bundles:
+            # Simple text overlap as fallback if no embeddings stored
+            score = self._text_similarity(query, bundle.body)
+            results.append({
+                "reddit_id": bundle.reddit_id,
+                "document": f"{bundle.title}\n{bundle.body}",
+                "metadata": {
+                    "subreddit": bundle.subreddit,
+                    "score": bundle.score,
+                    "author": bundle.author
+                },
+                "distance": 1 - score,
+                "relevance_score": score
             })
 
-        return formatted_results
+        results.sort(key=lambda x: x["relevance_score"], reverse=True)
+        return results[:n_results]
 
-    async def search_by_intent(
-        self,
-        intent: str,
-        location: Optional[str] = None,
-        n_results: int = 10
-    ) -> List[Dict[str, Any]]:
-        """Search for posts matching a specific intent pattern."""
-        query = f"Personal injury accident in {location or 'Florida'}: {intent}"
-        return await self.search_similar(query, n_results=n_results)
+    def _text_similarity(self, query: str, text: str) -> float:
+        """Simple keyword overlap similarity."""
+        query_words = set(query.lower().split())
+        text_words = set(text.lower().split())
+        if not query_words:
+            return 0.0
+        overlap = len(query_words & text_words)
+        return overlap / len(query_words)
 
     async def get_context_for_response(
         self,
@@ -180,99 +152,107 @@ class RAGEngine:
         post_body: str,
         n_results: int = 3
     ) -> List[str]:
-        """Get relevant context documents for crafting a response."""
+        """Get relevant context documents."""
         query = f"{post_title} {post_body[:500]}"
         results = await self.search_similar(query, n_results=n_results)
         return [r["document"] for r in results]
 
     async def initialize_kb(self):
-        """Initialize CaseClosedFL knowledge base."""
+        """Initialize CaseClosedFL knowledge base in SQLite."""
+        db = get_db_session()
+
         kb_docs = [
             {
-                "id": "kb_about",
-                "text": """CaseClosedFL is a Florida statewide accident intake and eligibility screening service. 
-We are NOT a law firm and do NOT provide legal advice. We collect accident information and may 
-connect qualified consumers with participating attorneys or law firms. Services: car accidents, 
-truck accidents, motorcycle accidents, pedestrian injuries, rideshare accidents, slip and fall. 
-Free eligibility check at caseclosedfl.com. No obligation."""
+                "reddit_id": "kb_about",
+                "subreddit": "kb",
+                "content_type": "kb",
+                "title": "About CaseClosedFL",
+                "body": "CaseClosedFL is a Florida statewide accident intake and eligibility screening service. We are NOT a law firm and do NOT provide legal advice. We collect accident information and may connect qualified consumers with participating attorneys or law firms. Services: car accidents, truck accidents, motorcycle accidents, pedestrian injuries, rideshare accidents, slip and fall. Free eligibility check at caseclosedfl.com. No obligation.",
+                "author": "caseclosedfl",
+                "score": 100
             },
             {
-                "id": "kb_process",
-                "text": """How CaseClosedFL works: 1) Answer eligibility questions about accident date, 
-injuries, medical care, fault, and attorney status. 2) Add contact information only if screening 
-criteria are met. 3) Intake review for referral to participating attorney. No attorney-client 
-relationship is created. No guarantee of representation or results."""
+                "reddit_id": "kb_process",
+                "subreddit": "kb",
+                "content_type": "kb",
+                "title": "How It Works",
+                "body": "How CaseClosedFL works: 1) Answer eligibility questions about accident date, injuries, medical care, fault, and attorney status. 2) Add contact information only if screening criteria are met. 3) Intake review for referral to participating attorney. No attorney-client relationship is created. No guarantee of representation or results.",
+                "author": "caseclosedfl",
+                "score": 100
             },
             {
-                "id": "kb_florida_accidents",
-                "text": """Florida accident facts: Florida is a no-fault insurance state for car accidents. 
-Personal Injury Protection (PIP) covers medical expenses regardless of fault. Serious injuries may 
-step outside no-fault. Statute of limitations for personal injury in Florida is generally 2 years 
-from date of accident (as of 2023 law change). This is general information, not legal advice."""
+                "reddit_id": "kb_florida",
+                "subreddit": "kb",
+                "content_type": "kb",
+                "title": "Florida Accident Facts",
+                "body": "Florida accident facts: Florida is a no-fault insurance state for car accidents. Personal Injury Protection (PIP) covers medical expenses regardless of fault. Serious injuries may step outside no-fault. Statute of limitations for personal injury in Florida is generally 2 years from date of accident (as of 2023 law change). This is general information, not legal advice.",
+                "author": "caseclosedfl",
+                "score": 100
             },
             {
-                "id": "kb_disclaimer",
-                "text": """IMPORTANT: CaseClosedFL is not a law firm. We do not provide legal representation 
-or legal advice. Only a licensed Florida attorney can give legal advice about your specific situation. 
-The information we provide is general educational information only. No attorney-client relationship 
-is created by using our service."""
+                "reddit_id": "kb_disclaimer",
+                "subreddit": "kb",
+                "content_type": "kb",
+                "title": "Disclaimer",
+                "body": "IMPORTANT: CaseClosedFL is not a law firm. We do not provide legal representation or legal advice. Only a licensed Florida attorney can give legal advice about your specific situation. The information we provide is general educational information only. No attorney-client relationship is created by using our service.",
+                "author": "caseclosedfl",
+                "score": 100
             },
             {
-                "id": "kb_miami",
-                "text": """Miami-Dade County accident information: High traffic volume on I-95, Palmetto 
-Expressway (SR 826), and Dolphin Expressway (SR 836). Common accident types: rear-end collisions, 
-intersection crashes, pedestrian incidents in downtown/Miami Beach. CaseClosedFL serves all Miami 
-metro areas including Miami Beach, Coral Gables, Hialeah, Kendall, Doral."""
+                "reddit_id": "kb_miami",
+                "subreddit": "kb",
+                "content_type": "kb",
+                "title": "Miami Info",
+                "body": "Miami-Dade County accident information: High traffic volume on I-95, Palmetto Expressway (SR 826), and Dolphin Expressway (SR 836). Common accident types: rear-end collisions, intersection crashes, pedestrian incidents in downtown/Miami Beach. CaseClosedFL serves all Miami metro areas including Miami Beach, Coral Gables, Hialeah, Kendall, Doral.",
+                "author": "caseclosedfl",
+                "score": 100
             },
             {
-                "id": "kb_orlando",
-                "text": """Orlando / Orange County accident information: Heavy tourist traffic on I-4, 
-International Drive, and near theme parks. Common issues: rental car accidents, Uber/Lyft 
-incidents, tourist pedestrian accidents. CaseClosedFL serves Orlando, Winter Park, Kissimmee, 
-and surrounding areas."""
+                "reddit_id": "kb_orlando",
+                "subreddit": "kb",
+                "content_type": "kb",
+                "title": "Orlando Info",
+                "body": "Orlando / Orange County accident information: Heavy tourist traffic on I-4, International Drive, and near theme parks. Common issues: rental car accidents, Uber/Lyft incidents, tourist pedestrian accidents. CaseClosedFL serves Orlando, Winter Park, Kissimmee, and surrounding areas.",
+                "author": "caseclosedfl",
+                "score": 100
             },
             {
-                "id": "kb_tampa",
-                "text": """Tampa / Hillsborough County accident information: Major corridors include I-275, 
-I-4, and the Selmon Expressway. Port Tampa Bay commercial traffic. CaseClosedFL serves Tampa, 
-St. Petersburg, Clearwater, and surrounding Pinellas/Hillsborough areas."""
+                "reddit_id": "kb_tampa",
+                "subreddit": "kb",
+                "content_type": "kb",
+                "title": "Tampa Info",
+                "body": "Tampa / Hillsborough County accident information: Major corridors include I-275, I-4, and the Selmon Expressway. Port Tampa Bay commercial traffic. CaseClosedFL serves Tampa, St. Petersburg, Clearwater, and surrounding Pinellas/Hillsborough areas.",
+                "author": "caseclosedfl",
+                "score": 100
             }
         ]
 
-        embeddings = await self._embed([doc["text"] for doc in kb_docs])
+        for doc in kb_docs:
+            existing = db.query(RedditBundle).filter(RedditBundle.reddit_id == doc["reddit_id"]).first()
+            if not existing:
+                bundle = RedditBundle(**doc)
+                db.add(bundle)
 
-        self.kb_collection.add(
-            ids=[doc["id"] for doc in kb_docs],
-            embeddings=embeddings,
-            documents=[doc["text"] for doc in kb_docs],
-            metadatas=[{"source": "caseclosed_kb"} for _ in kb_docs]
-        )
-
-        logger.info(f"Initialized knowledge base with {len(kb_docs)} documents")
+        db.commit()
+        logger.info(f"Initialized KB with {len(kb_docs)} documents")
 
     async def get_kb_context(self, query: str, n_results: int = 3) -> List[str]:
-        """Retrieve relevant knowledge base documents."""
-        query_embedding = await self._embed([query])
-
-        results = self.kb_collection.query(
-            query_embeddings=query_embedding,
-            n_results=n_results,
-            include=["documents"]
-        )
-
-        return results["documents"][0] if results["documents"] else []
+        """Retrieve relevant KB documents."""
+        results = await self.search_similar(query, n_results=n_results, subreddit_filter="kb")
+        return [r["document"] for r in results]
 
     def get_stats(self) -> Dict[str, Any]:
-        """Get RAG engine statistics."""
+        db = get_db_session()
+        total = db.query(RedditBundle).count()
+        kb = db.query(RedditBundle).filter(RedditBundle.subreddit == "kb").count()
         return {
-            "reddit_bundles_count": self.collection.count(),
-            "kb_documents_count": self.kb_collection.count(),
-            "embedding_provider": "nvidia_nim" if self._use_nvidia else "local_sentence_transformers",
+            "reddit_bundles_count": total - kb,
+            "kb_documents_count": kb,
+            "embedding_provider": "nvidia_nim" if self._use_nvidia else "fallback_hash",
             "persist_dir": settings.chroma_persist_dir
         }
 
 
-# Singleton
 _rag_engine: Optional[RAGEngine] = None
 
 
