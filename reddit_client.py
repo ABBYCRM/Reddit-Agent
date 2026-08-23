@@ -27,10 +27,11 @@ class RateLimitState:
     remaining: int = 100
     reset_timestamp: float = 0.0
     last_updated: float = 0.0
+    burst_buffer: int = 5
 
     @property
     def is_near_limit(self) -> bool:
-        return self.remaining <= settings.reddit_burst_buffer
+        return self.remaining <= self.burst_buffer
 
     @property
     def seconds_until_reset(self) -> float:
@@ -45,7 +46,7 @@ class RedditRateLimiter:
         self.burst_buffer = burst_buffer
         self.tokens = float(max_qpm)
         self.last_update = time.time()
-        self.rate_limit_state = RateLimitState()
+        self.rate_limit_state = RateLimitState(burst_buffer=burst_buffer)
         self._lock_acquired = False
 
     def _refill_tokens(self):

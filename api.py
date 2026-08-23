@@ -3,10 +3,11 @@ CaseClosedFL Reddit Agent - FastAPI Web UI
 Control dashboard for monitoring and managing the agent.
 """
 import logging
+from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
-from fastapi import FastAPI, Request, Depends, BackgroundTasks
+from fastapi import FastAPI, Request, Depends, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -27,8 +28,9 @@ settings = get_settings()
 app = FastAPI(title="CaseClosedFL Agent Control Center")
 
 # Templates and static files
-templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+base_dir = Path(__file__).resolve().parent
+templates = Jinja2Templates(directory=str(base_dir / "templates"))
+app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
 
 # Global scheduler instance
 scheduler: Optional[AgentScheduler] = None
@@ -38,6 +40,7 @@ scheduler: Optional[AgentScheduler] = None
 async def startup():
     """Initialize database and services on startup."""
     init_db()
+    await get_rag_engine().initialize_kb()
     global scheduler
     scheduler = AgentScheduler()
     scheduler.start()
@@ -151,7 +154,13 @@ async def trigger_discovery(background_tasks: BackgroundTasks):
 @app.post("/api/toggle-auto-reply")
 async def toggle_auto_reply():
     """Toggle auto-reply setting."""
-    # In production, update database config; here we just return status
+    if settings.app_env.lower() == "production":
+        raise HTTPException(
+            status_code=403,
+            detail="Set ENABLE_AUTO_REPLY through the deployment environment in production",
+        )
+
+    settings.enable_auto_reply = not settings.enable_auto_reply
     return {
         "status": "success",
         "auto_reply": settings.enable_auto_reply,

@@ -11,16 +11,16 @@ praw==7.7.1
 
 # LLM / AI
 openai==1.54.0
-langchain==0.3.7
-langchain-community==0.3.5
-langchain-openai==0.2.5
 langgraph==0.2.45
 
 # RAG / Vector Store - use lightweight alternatives
 chromadb==0.5.18
+# Chroma 0.5.x uses PostHog's pre-6 positional capture API.
+posthog<6.0.0
 
-# Database - SQLite only for DO App Platform
+# Database
 sqlalchemy==2.0.36
+psycopg[binary]==3.2.3
 
 # Scheduling
 apscheduler==3.10.4

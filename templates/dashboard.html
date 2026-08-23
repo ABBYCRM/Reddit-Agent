@@ -103,16 +103,19 @@
         <div class="card controls">
             <h3>Controls</h3>
             <div class="button-group">
-                <button onclick="triggerDiscovery()" class="btn btn-primary">Trigger Discovery</button>
-                <button onclick="toggleAutoReply()" class="btn btn-secondary">Toggle Auto-Reply</button>
-                <a href="/api/health" target="_blank" class="btn btn-ghost">Health Check</a>
+                <button type="button" onclick="triggerDiscovery()" class="btn btn-primary">Trigger Discovery</button>
+                <button type="button" onclick="toggleAutoReply()" class="btn btn-secondary">Toggle Auto-Reply</button>
+                <a href="/api/health" target="_blank" rel="noopener noreferrer" class="btn btn-ghost">Health Check</a>
             </div>
+            <p id="control-status" class="control-status" role="status" aria-live="polite"></p>
         </div>
 
         <!-- Recent Runs -->
         <div class="card">
             <h3>Recent Agent Runs</h3>
+            <div class="table-region" role="region" aria-label="Recent agent runs" tabindex="0">
             <table>
+                <caption>Latest agent executions</caption>
                 <thead>
                     <tr>
                         <th>Agent</th>
@@ -134,6 +137,7 @@
                     {% endfor %}
                 </tbody>
             </table>
+            </div>
         </div>
 
         <!-- Scheduler Status -->
@@ -152,16 +156,27 @@
 
     <script>
         async function triggerDiscovery() {
-            const res = await fetch('/api/trigger-discovery', {method: 'POST'});
-            const data = await res.json();
-            alert(data.message);
+            await runControl('/api/trigger-discovery');
         }
 
         async function toggleAutoReply() {
-            const res = await fetch('/api/toggle-auto-reply', {method: 'POST'});
-            const data = await res.json();
-            alert(data.message);
-            location.reload();
+            const succeeded = await runControl('/api/toggle-auto-reply');
+            if (succeeded) location.reload();
+        }
+
+        async function runControl(endpoint) {
+            const status = document.getElementById('control-status');
+            status.textContent = 'Working…';
+            try {
+                const response = await fetch(endpoint, {method: 'POST'});
+                const data = await response.json();
+                if (!response.ok) throw new Error(data.detail || data.message || 'Request failed');
+                status.textContent = data.message || 'Done';
+                return true;
+            } catch (error) {
+                status.textContent = error.message;
+                return false;
+            }
         }
     </script>
 </body>

@@ -147,6 +147,34 @@ h1 {
     transition: all 0.2s;
 }
 
+.btn:focus-visible,
+.table-region:focus-visible {
+    outline: 3px solid var(--warning);
+    outline-offset: 3px;
+}
+
+.control-status {
+    min-height: 1.5rem;
+    margin-top: 0.75rem;
+    color: var(--text-muted);
+}
+
+.table-region {
+    overflow-x: auto;
+}
+
+caption {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
 .btn-primary {
     background: var(--primary);
     color: white;

@@ -3,13 +3,15 @@ CaseClosedFL Reddit Agent - RAG Engine
 ChromaDB vector store with NVIDIA embeddings for Reddit post retrieval.
 Supports semantic search, hybrid retrieval, and contextual compression.
 """
+import hashlib
 import logging
+import math
+import re
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 import chromadb
 from chromadb.config import Settings as ChromaSettings
-from sentence_transformers import SentenceTransformer
 
 from config import get_settings
 from nvidia_llm import get_nvidia_client
@@ -45,18 +47,29 @@ class RAGEngine:
             metadata={"hnsw:space": "cosine"}
         )
 
-        # Local embedding fallback (if NVIDIA API unavailable)
-        self._local_embedder: Optional[SentenceTransformer] = None
         self.nvidia = get_nvidia_client()
-        self._use_nvidia = True
+        self._use_nvidia = bool(
+            settings.nvidia_api_key
+            and settings.nvidia_api_key != "nvapi-your-nvidia-key"
+        )
 
-    @property
-    def local_embedder(self) -> SentenceTransformer:
-        """Lazy-load local embedding model."""
-        if self._local_embedder is None:
-            logger.info("Loading local embedding model (fallback)...")
-            self._local_embedder = SentenceTransformer("all-MiniLM-L6-v2")
-        return self._local_embedder
+    @staticmethod
+    def _local_embed(texts: List[str], dimensions: int = 384) -> List[List[float]]:
+        """Create deterministic, dependency-free hashing embeddings."""
+        vectors: List[List[float]] = []
+        for text in texts:
+            vector = [0.0] * dimensions
+            for token in re.findall(r"[a-z0-9]+", text.lower()):
+                digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+                bucket = int.from_bytes(digest, "big") % dimensions
+                sign = 1.0 if digest[0] & 1 else -1.0
+                vector[bucket] += sign
+
+            norm = math.sqrt(sum(value * value for value in vector))
+            if norm:
+                vector = [value / norm for value in vector]
+            vectors.append(vector)
+        return vectors
 
     async def _embed(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings using NVIDIA NIM or local fallback."""
@@ -67,9 +80,7 @@ class RAGEngine:
                 logger.warning(f"NVIDIA embedding failed, falling back to local: {e}")
                 self._use_nvidia = False
 
-        # Local fallback
-        embeddings = self.local_embedder.encode(texts, convert_to_list=True)
-        return embeddings
+        return self._local_embed(texts)
 
     async def add_reddit_post(
         self,
@@ -112,7 +123,7 @@ class RAGEngine:
         embeddings = await self._embed([doc_text])
 
         # Add to collection
-        self.collection.add(
+        self.collection.upsert(
             ids=[reddit_id],
             embeddings=embeddings,
             documents=[doc_text],
@@ -137,6 +148,9 @@ class RAGEngine:
             subreddit_filter: Optional subreddit to filter by
             min_score: Minimum Reddit score filter
         """
+        if self.collection.count() == 0:
+            return []
+
         query_embedding = await self._embed([query])
 
         where_filter = {}
@@ -241,7 +255,7 @@ St. Petersburg, Clearwater, and surrounding Pinellas/Hillsborough areas."""
 
         embeddings = await self._embed([doc["text"] for doc in kb_docs])
 
-        self.kb_collection.add(
+        self.kb_collection.upsert(
             ids=[doc["id"] for doc in kb_docs],
             embeddings=embeddings,
             documents=[doc["text"] for doc in kb_docs],
@@ -252,6 +266,9 @@ St. Petersburg, Clearwater, and surrounding Pinellas/Hillsborough areas."""
 
     async def get_kb_context(self, query: str, n_results: int = 3) -> List[str]:
         """Retrieve relevant knowledge base documents."""
+        if self.kb_collection.count() == 0:
+            return []
+
         query_embedding = await self._embed([query])
 
         results = self.kb_collection.query(

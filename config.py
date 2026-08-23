@@ -2,14 +2,20 @@
 CaseClosedFL Reddit Agent - Configuration
 Centralized settings with Pydantic Settings v2
 """
-import os
 from typing import List, Optional
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Application configuration loaded from environment variables."""
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     # App
     app_env: str = Field(default="development", alias="APP_ENV")
@@ -17,8 +23,8 @@ class Settings(BaseSettings):
     secret_key: str = Field(default="dev-secret", alias="SECRET_KEY")
 
     # Reddit API
-    reddit_client_id: str = Field(alias="REDDIT_CLIENT_ID")
-    reddit_client_secret: str = Field(alias="REDDIT_CLIENT_SECRET")
+    reddit_client_id: Optional[str] = Field(default=None, alias="REDDIT_CLIENT_ID")
+    reddit_client_secret: Optional[str] = Field(default=None, alias="REDDIT_CLIENT_SECRET")
     reddit_user_agent: str = Field(
         default="caseclosedfl-agent/1.0 (by /u/caseclosedfl)",
         alias="REDDIT_USER_AGENT"
@@ -29,7 +35,7 @@ class Settings(BaseSettings):
     reddit_burst_buffer: int = Field(default=5, alias="REDDIT_BURST_BUFFER")
 
     # NVIDIA NIM
-    nvidia_api_key: str = Field(alias="NVIDIA_API_KEY")
+    nvidia_api_key: Optional[str] = Field(default=None, alias="NVIDIA_API_KEY")
     nvidia_base_url: str = Field(
         default="https://integrate.api.nvidia.com/v1",
         alias="NVIDIA_BASE_URL"
@@ -48,7 +54,7 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = Field(
-        default="postgresql://user:pass@localhost:5432/caseclosed_agent",
+        default="sqlite:///./data/caseclosed.db",
         alias="DATABASE_URL"
     )
     redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
@@ -84,30 +90,22 @@ class Settings(BaseSettings):
     heartbeat_interval_seconds: int = Field(default=60, alias="HEARTBEAT_INTERVAL_SECONDS")
     cleanup_interval_hours: int = Field(default=24, alias="CLEANUP_INTERVAL_HOURS")
 
-    @field_validator("target_states", "target_cities", "target_subreddits", mode="before")
-    @classmethod
-    def parse_comma_list(cls, v):
-        if isinstance(v, str):
-            return [x.strip() for x in v.split(",")]
-        return v
+    @staticmethod
+    def parse_comma_list(value: str) -> List[str]:
+        """Parse a comma-separated setting while discarding empty entries."""
+        return [item.strip() for item in value.split(",") if item.strip()]
 
     @property
     def target_states_list(self) -> List[str]:
-        return self.target_states if isinstance(self.target_states, list) else [self.target_states]
+        return self.parse_comma_list(self.target_states)
 
     @property
     def target_cities_list(self) -> List[str]:
-        return self.target_cities if isinstance(self.target_cities, list) else [self.target_cities]
+        return self.parse_comma_list(self.target_cities)
 
     @property
     def target_subreddits_list(self) -> List[str]:
-        return self.target_subreddits if isinstance(self.target_subreddits, list) else [self.target_subreddits]
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        extra = "ignore"
-
+        return self.parse_comma_list(self.target_subreddits)
 
 # Singleton instance
 _settings: Optional[Settings] = None

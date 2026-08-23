@@ -3,12 +3,14 @@ CaseClosedFL Reddit Agent - Database Layer
 SQLite/PostgreSQL compatible with SQLAlchemy 2.0
 """
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, List
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, 
     Float, Boolean, ForeignKey, JSON, Index, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
+from sqlalchemy.engine import make_url
 import uuid
 
 from config import get_settings
@@ -18,15 +20,19 @@ settings = get_settings()
 # Detect database type
 is_sqlite = settings.database_url.startswith("sqlite")
 
+if is_sqlite:
+    sqlite_database = make_url(settings.database_url).database
+    if sqlite_database and sqlite_database != ":memory:":
+        Path(sqlite_database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+
 # Engine with connection pooling
-engine = create_engine(
-    settings.database_url,
-    pool_size=10 if not is_sqlite else 0,
-    max_overflow=20 if not is_sqlite else 0,
-    pool_pre_ping=True,
-    echo=False,
-    connect_args={"check_same_thread": False} if is_sqlite else {}
-)
+engine_options = {"pool_pre_ping": True, "echo": False}
+if is_sqlite:
+    engine_options["connect_args"] = {"check_same_thread": False}
+else:
+    engine_options.update({"pool_size": 10, "max_overflow": 20})
+
+engine = create_engine(settings.database_url, **engine_options)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()

@@ -5,6 +5,7 @@ and ethical lead generation. No AI-bs safety theater.
 """
 import re
 import logging
+from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,24 +39,24 @@ class SafetyGuardrails:
 
     # Patterns that indicate user already has an attorney
     HAS_ATTORNEY_PATTERNS = [
-        r"my attorney", r"my lawyer", r"represented by",
-        r"legal counsel", r"hired a lawyer", r"hired an attorney",
-        r"retained.*(lawyer|attorney)", r"my firm",
-        r"speaking with my attorney", r"my legal team"
+        r"\bmy attorney\b", r"\bmy lawyer\b", r"\brepresented by\b",
+        r"\blegal counsel\b", r"\bhired a lawyer\b", r"\bhired an attorney\b",
+        r"\bretained\b.*\b(lawyer|attorney)\b", r"\bmy firm\b",
+        r"\bspeaking with my attorney\b", r"\bmy legal team\b"
     ]
 
     # Patterns that indicate this is a legal advice request (not for us)
     LEGAL_ADVICE_PATTERNS = [
-        r"should I sue", r"can I sue", r"do I have a case",
-        r"what are my rights", r"what should I do legally",
-        r"is this illegal", r"can they do this legally"
+        r"\bshould I sue\b", r"\bcan I sue\b", r"\bdo I have a case\b",
+        r"\bwhat are my rights\b", r"\bwhat should I do legally\b",
+        r"\bis this illegal\b", r"\bcan they do this legally\b"
     ]
 
     # Spam / low quality indicators
     SPAM_PATTERNS = [
-        r"click here", r"DM me", r"message me",
-        r"free consultation.*now", r"limited time",
-        r"act now", r"guaranteed.*win", r"millions"
+        r"\bclick here\b", r"\bDM me\b", r"\bmessage me\b",
+        r"\bfree consultation\b.*\bnow\b", r"\blimited time\b",
+        r"\bact now\b", r"\bguaranteed\b.*\bwin\b", r"\bmillions\b"
     ]
 
     # Subreddits we should NEVER post in (protected communities)
@@ -181,10 +182,13 @@ class SafetyGuardrails:
             ))
 
         # 5. Florida relevance check
-        florida_indicators = ["florida", "fl", "miami", "orlando", "tampa", "jacksonville", 
+        florida_indicators = ["florida", "fl", "miami", "orlando", "tampa", "jacksonville",
                            "fort lauderdale", "west palm beach", "broward", "dade", "orange county",
                            "hillsborough", "pinellas", "palm beach county"]
-        is_florida_relevant = any(ind in text for ind in florida_indicators)
+        is_florida_relevant = any(
+            re.search(rf"\b{re.escape(indicator)}\b", text, re.I)
+            for indicator in florida_indicators
+        )
 
         if not is_florida_relevant:
             # Not a hard block, but flag as low priority
@@ -217,7 +221,7 @@ class SafetyGuardrails:
         text_lower = response_text.lower()
 
         # 1. Required disclaimers
-        has_disclaimer = any(phrase in text_lower for phrase in self.REQUIRED_DISCLAIMERS)
+        has_disclaimer = all(phrase in text_lower for phrase in self.REQUIRED_DISCLAIMERS)
         if not has_disclaimer:
             checks.append(SafetyCheck(
                 passed=False,
@@ -238,10 +242,10 @@ class SafetyGuardrails:
 
         # 2. No legal advice claims
         legal_advice_claims = [
-            r"you should.*(sue|file|claim)",
-            r"you have a case", r"you will win",
-            r"you are entitled to.*\$",
-            r"your case is worth"
+            r"\byou should\b.*\b(sue|file|claim)\b",
+            r"\byou have a case\b", r"\byou will win\b",
+            r"\byou are entitled to\b.*\$",
+            r"\byour case is worth\b"
         ]
         gives_advice = any(re.search(p, text_lower) for p in legal_advice_claims)
         if gives_advice:
@@ -302,9 +306,18 @@ class SafetyGuardrails:
                 action="allow"
             ))
 
-        # 5. URL check - only allow caseclosedfl.com
+        # 5. URL check - only allow CaseClosedFL and Reddit hosts.
         urls = re.findall(r'https?://[^\s]+', response_text)
-        bad_urls = [u for u in urls if "caseclosedfl.com" not in u and "reddit.com" not in u]
+        allowed_domains = ("caseclosedfl.com", "reddit.com")
+
+        def is_allowed_url(url: str) -> bool:
+            hostname = (urlparse(url.rstrip(".,);!?]")).hostname or "").lower()
+            return any(
+                hostname == domain or hostname.endswith(f".{domain}")
+                for domain in allowed_domains
+            )
+
+        bad_urls = [url for url in urls if not is_allowed_url(url)]
         if bad_urls:
             checks.append(SafetyCheck(
                 passed=False,
@@ -355,3 +368,4 @@ def get_guardrails() -> SafetyGuardrails:
     if _guardrails is None:
         _guardrails = SafetyGuardrails()
     return _guardrails
+
