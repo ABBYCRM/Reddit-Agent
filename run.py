@@ -6,6 +6,7 @@ Initializes all systems and starts the 24/7 scheduler.
 import logging
 import sys
 import asyncio
+import warnings
 
 from config import get_settings
 from database import init_db
@@ -16,10 +17,7 @@ from scheduler import AgentScheduler
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler('agent.log')
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 
 logger = logging.getLogger("main")
@@ -42,12 +40,15 @@ async def startup_sequence():
     await rag.initialize_kb()
     logger.info("    OK RAG KB initialized")
 
-    # 3. Reddit client validation
+    # 3. Reddit client validation (soft fail - log only)
     logger.info("[3/4] Validating Reddit API...")
-    from reddit_client import get_reddit_client
-    reddit = get_reddit_client()
-    stats = reddit.get_stats()
-    logger.info(f"    OK Reddit client ready (daily: {stats['daily_engagements']}/{stats['daily_limit']})")
+    try:
+        from reddit_client import get_reddit_client
+        reddit = get_reddit_client()
+        stats = reddit.get_stats()
+        logger.info(f"    OK Reddit client ready (daily: {stats['daily_engagements']}/{stats['daily_limit']})")
+    except Exception as e:
+        logger.warning(f"    Reddit client not ready: {e}. Will retry on first cycle.")
 
     # 4. Safety guardrails
     logger.info("[4/4] Loading safety guardrails...")
@@ -65,14 +66,11 @@ def main():
     """Main entry point."""
     settings = get_settings()
 
-    # Validate critical config
+    # Soft warnings for missing credentials (no hard exits)
     if not settings.reddit_client_id or settings.reddit_client_id == "your_reddit_client_id":
-        logger.error("CRITICAL: Reddit credentials not configured. Set REDDIT_CLIENT_ID in .env")
-        sys.exit(1)
-
+        logger.warning("REDDIT_CLIENT_ID not configured. Agent will run in monitoring-only mode.")
     if not settings.nvidia_api_key or settings.nvidia_api_key == "nvapi-your-nvidia-key":
-        logger.error("CRITICAL: NVIDIA API key not configured. Get one at build.nvidia.com")
-        sys.exit(1)
+        logger.warning("NVIDIA_API_KEY not configured. LLM features disabled.")
 
     # Run startup
     asyncio.run(startup_sequence())
@@ -81,10 +79,16 @@ def main():
     scheduler = AgentScheduler()
     scheduler.start()
 
+    # Keep main thread alive with proper event loop handling
     try:
-        # Keep main thread alive
-        while True:
-            asyncio.get_event_loop().run_forever()
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # If APScheduler already started the loop, just block
+            import time
+            while True:
+                time.sleep(1)
+        else:
+            loop.run_forever()
     except KeyboardInterrupt:
         logger.info("Shutdown signal received...")
         scheduler.shutdown()
