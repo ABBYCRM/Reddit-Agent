@@ -1,51 +1,28 @@
-# Deploy CaseClosedFL Agent to DigitalOcean
+# DigitalOcean App Platform deployment
 
-## Option 1: DigitalOcean App Platform (Easiest)
+Deploy two components from the same revision:
 
-1. Push code to GitHub
-2. In DigitalOcean Console: Apps -> Create App -> GitHub
-3. Select repository and branch
-4. Configure environment variables from `.env`
-5. Add PostgreSQL database (managed)
-6. Add Redis (managed)
-7. Deploy
+- **web**: `uvicorn api:app --host 0.0.0.0 --port ${PORT:-8000}` with health check `/api/health`.
+- **worker**: `python run.py`. Only this component starts the scheduler.
 
-## Option 2: DigitalOcean Droplet + Docker
+Use a managed PostgreSQL database and provide its private SQLAlchemy URL as
+`DATABASE_URL` (for example `postgresql+psycopg://...`). Do not expose a
+database port or use local container storage as production persistence.
 
-```bash
-# 1. Create Droplet (Ubuntu 22.04, 2GB RAM minimum)
-# 2. SSH in
-sudo apt update && sudo apt install -y docker.io docker-compose
-git clone <your-repo>
-cd caseclosed-reddit-agent
-cp .env.example .env
-# Edit .env with real credentials
-sudo docker-compose up -d
-```
+Add all secrets in App Platform's encrypted environment settings: `SECRET_KEY`,
+`OPERATOR_API_KEY`, `DATABASE_URL`, `COMPOSIO_API_KEY`,
+`COMPOSIO_REDDIT_CONNECTED_ACCOUNT_ID`, `COMPOSIO_REDDIT_USER_ID`, and optional
+`NVIDIA_API_KEY`.
+Set `APP_ENV=production`, `REDDIT_TRANSPORT=composio`,
+`ENABLE_AUTO_REPLY=false`, and `ENABLE_DM_OUTREACH=false`.
 
-## Option 3: DigitalOcean Gradient AI ADK (Future)
+Deployment order:
 
-When ADK supports custom agent runtimes:
-```bash
-pip install gradient-adk
-gradient agent deploy
-```
-
-## Environment Variables Required
-
-- `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`
-- `REDDIT_USERNAME` / `REDDIT_PASSWORD`
-- `NVIDIA_API_KEY` (get free at build.nvidia.com)
-- `DATABASE_URL`
-- `REDIS_URL`
-
-## Monitoring
-
-- Dashboard: `http://your-droplet-ip:8000`
-- Health: `http://your-droplet-ip:8000/api/health`
-- Logs: `docker logs caseclosed-worker`
-
-## Reddit API Commercial Note
-
-Per Reddit's 2026 terms: Free tier = 100 QPM. Commercial use requires contract at $0.24/1K calls.
-CaseClosedFL should request commercial approval if scaling beyond research/monitoring.
+1. Create or select the managed database and configure its private URL.
+2. Run `python migrate.py` **once** against that database before updating the
+   web and worker components. Do not run concurrent schema upgrades in both.
+3. Configure the web component and confirm `/api/health` returns `healthy`.
+4. Add the worker component and verify it starts exactly one scheduler.
+4. Review draft engagement records and outbound safety logs before considering
+   any automation change. Automation remains a separate, reviewed deployment
+   decision; it cannot be enabled through the dashboard.

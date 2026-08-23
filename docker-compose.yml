@@ -1,57 +1,43 @@
-version: '3.8'
-
 services:
-  app:
+  web:
     build: .
-    container_name: caseclosed-agent
     restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "8000"
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-caseclosed}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-caseclosed_agent}
     ports:
       - "8000:8000"
-    env_file:
-      - .env
+    command: sh -c 'uvicorn api:app --host 0.0.0.0 --port $${PORT:-8000}'
     depends_on:
-      - postgres
-      - redis
-    volumes:
-      - ./chroma_db:/app/chroma_db
-      - ./agent.log:/app/agent.log
-    command: uvicorn api:app --host 0.0.0.0 --port 8000 --workers 1
+      postgres:
+        condition: service_healthy
 
   worker:
     build: .
-    container_name: caseclosed-worker
     restart: unless-stopped
-    env_file:
-      - .env
-    depends_on:
-      - postgres
-      - redis
-    volumes:
-      - ./chroma_db:/app/chroma_db
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-caseclosed}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-caseclosed_agent}
     command: python run.py
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   postgres:
-    image: ankane/pgvector:latest
-    container_name: caseclosed-postgres
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: caseclosed
-      POSTGRES_PASSWORD: caseclosed_secret_2026
-      POSTGRES_DB: caseclosed_agent
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-caseclosed}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-caseclosed_agent}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-
-  redis:
-    image: redis:7-alpine
-    container_name: caseclosed-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   postgres_data:
-  redis_data:
