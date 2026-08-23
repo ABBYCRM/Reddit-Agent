@@ -51,7 +51,7 @@ class Settings(BaseSettings):
         default="postgresql://user:pass@localhost:5432/caseclosed_agent",
         alias="DATABASE_URL"
     )
-    redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
 
     # ChromaDB
     chroma_persist_dir: str = Field(default="./chroma_db", alias="CHROMA_PERSIST_DIR")
