@@ -26,7 +26,7 @@ pgvector==0.3.6
 # Database
 sqlalchemy==2.0.36
 alembic==1.14.0
-psycopg2-binary==2.9.10; sys_platform != 'win32'
+psycopg2-binary==2.9.10
 redis==5.2.0
 
 # Scheduling / Background Jobs
