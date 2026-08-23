@@ -1,12 +1,10 @@
 """
 CaseClosedFL Reddit Agent - Agent Orchestrator
-LangGraph-based state machine coordinating all sub-agents.
+Simple async pipeline without langgraph dependency.
 """
 import logging
-from typing import Dict, Any, TypedDict, Annotated
+from typing import Dict, Any
 from datetime import datetime
-
-from langgraph.graph import StateGraph, END
 
 from config import get_settings
 from discovery_agent import get_discovery_agent
@@ -19,22 +17,8 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-class AgentState(TypedDict):
-    """Shared state across agent workflow."""
-    cycle: int
-    discovery_results: Dict[str, Any]
-    engagement_results: Dict[str, Any]
-    monitor_results: Dict[str, Any]
-    qualifier_results: Dict[str, Any]
-    errors: list
-    status: str  # running, success, failed
-
-
 class AgentOrchestrator:
-    """
-    Orchestrates the full agent pipeline using LangGraph.
-    State machine: Discover -> Engage -> Monitor -> Qualify
-    """
+    """Orchestrates the full agent pipeline. Simple async, no langgraph."""
 
     def __init__(self):
         self.discovery = get_discovery_agent()
@@ -42,96 +26,103 @@ class AgentOrchestrator:
         self.monitor = get_monitor_agent()
         self.qualifier = get_qualifier_agent()
 
-        # Build LangGraph
-        self.workflow = StateGraph(AgentState)
-
-        # Add nodes
-        self.workflow.add_node("discover", self._run_discovery)
-        self.workflow.add_node("engage", self._run_engagement)
-        self.workflow.add_node("monitor", self._run_monitor)
-        self.workflow.add_node("qualify", self._run_qualify)
-
-        # Add edges
-        self.workflow.set_entry_point("discover")
-        self.workflow.add_edge("discover", "engage")
-        self.workflow.add_edge("engage", "monitor")
-        self.workflow.add_edge("monitor", "qualify")
-        self.workflow.add_edge("qualify", END)
-
-        self.app = self.workflow.compile()
-
-    async def _run_discovery(self, state: AgentState) -> AgentState:
-        """Discovery phase."""
+    async def run_full_cycle(self) -> Dict[str, Any]:
+        """Execute complete agent cycle: Discover -> Engage -> Monitor -> Qualify."""
+        run_id = None
         try:
-            results = await self.discovery.run()
-            state["discovery_results"] = results
-            logger.info(f"Discovery: {len(results.get('high_intent_posts', []))} high-intent posts")
+            db = get_db_session()
+            run_record = AgentRun(
+                agent_name="orchestrator",
+                run_type="full_cycle",
+                status="running",
+                started_at=datetime.utcnow()
+            )
+            db.add(run_record)
+            db.commit()
+            run_id = run_record.id
+
+            result = {
+                "status": "running",
+                "errors": [],
+                "discovery_results": {},
+                "engagement_results": {},
+                "monitor_results": {},
+                "qualifier_results": {}
+            }
+
+            # Phase 1: Discovery
+            logger.info("=== PHASE 1: DISCOVERY ===")
+            try:
+                disc = await self.discovery.run()
+                result["discovery_results"] = disc
+                logger.info(f"Discovery: {len(disc.get('high_intent_posts', []))} high-intent posts")
+            except Exception as e:
+                logger.error(f"Discovery failed: {e}")
+                result["errors"].append(f"discovery: {str(e)}")
+
+            # Phase 2: Engagement
+            logger.info("=== PHASE 2: ENGAGEMENT ===")
+            try:
+                posts = result["discovery_results"].get("high_intent_posts", [])
+                if posts:
+                    eng = await self.engagement.run(posts)
+                    result["engagement_results"] = eng
+
+                    # Add monitors for engaged posts
+                    for post in posts[:10]:
+                        await self.monitor.add_monitor(
+                            post_id=post["reddit_id"],
+                            subreddit=post["subreddit"],
+                            title=post["title"],
+                            priority=3 if post.get("lead_temperature") == "hot" else 2,
+                            reason=f"Intent: {post.get('intent_score')}"
+                        )
+            except Exception as e:
+                logger.error(f"Engagement failed: {e}")
+                result["errors"].append(f"engagement: {str(e)}")
+
+            # Phase 3: Monitor
+            logger.info("=== PHASE 3: MONITOR ===")
+            try:
+                mon = await self.monitor.run()
+                result["monitor_results"] = mon
+
+                if mon.get("replies_requiring_action"):
+                    qual = await self.qualifier.process_new_replies(mon["replies_requiring_action"])
+                    result["qualifier_results"] = qual
+            except Exception as e:
+                logger.error(f"Monitor failed: {e}")
+                result["errors"].append(f"monitor: {str(e)}")
+
+            # Phase 4: Qualify
+            logger.info("=== PHASE 4: QUALIFY ===")
+            try:
+                qual = await self.qualifier.run_daily_qualification()
+                result["qualifier_results"] = qual
+            except Exception as e:
+                logger.error(f"Qualify failed: {e}")
+                result["errors"].append(f"qualify: {str(e)}")
+
+            # Finalize
+            result["status"] = "success" if not result["errors"] else "partial"
+
+            run_record.status = result["status"]
+            run_record.completed_at = datetime.utcnow()
+            db.commit()
+
+            return result
+
         except Exception as e:
-            state["errors"].append(f"discovery: {str(e)}")
-            state["status"] = "failed"
-        return state
-
-    async def _run_engagement(self, state: AgentState) -> AgentState:
-        """Engagement phase."""
-        try:
-            posts = state["discovery_results"].get("high_intent_posts", [])
-            if posts:
-                results = await self.engagement.run(posts)
-                state["engagement_results"] = results
-
-                # Add monitors for engaged posts
-                for post in posts[:10]:  # Monitor top 10
-                    await self.monitor.add_monitor(
-                        post_id=post["reddit_id"],
-                        subreddit=post["subreddit"],
-                        title=post["title"],
-                        priority=3 if post.get("lead_temperature") == "hot" else 2,
-                        reason=f"Intent score: {post.get('intent_score')}"
-                    )
-        except Exception as e:
-            state["errors"].append(f"engagement: {str(e)}")
-        return state
-
-    async def _run_monitor(self, state: AgentState) -> AgentState:
-        """Monitor phase."""
-        try:
-            results = await self.monitor.run()
-            state["monitor_results"] = results
-
-            # Process any replies through qualifier
-            if results.get("replies_requiring_action"):
-                qual_results = await self.qualifier.process_new_replies(
-                    results["replies_requiring_action"]
-                )
-                state["qualifier_results"] = qual_results
-        except Exception as e:
-            state["errors"].append(f"monitor: {str(e)}")
-        return state
-
-    async def _run_qualify(self, state: AgentState) -> AgentState:
-        """Qualification phase."""
-        try:
-            results = await self.qualifier.run_daily_qualification()
-            state["qualifier_results"] = results
-            state["status"] = "success"
-        except Exception as e:
-            state["errors"].append(f"qualify: {str(e)}")
-            state["status"] = "failed"
-        return state
-
-    async def run_full_cycle(self) -> AgentState:
-        """Execute complete agent cycle."""
-        initial_state = AgentState(
-            cycle=1,
-            discovery_results={},
-            engagement_results={},
-            monitor_results={},
-            qualifier_results={},
-            errors=[],
-            status="running"
-        )
-
-        return await self.app.ainvoke(initial_state)
+            logger.error(f"Orchestrator crashed: {e}")
+            if run_id:
+                db = get_db_session()
+                run_record = db.query(AgentRun).filter(AgentRun.id == run_id).first()
+                if run_record:
+                    run_record.status = "failed"
+                    run_record.completed_at = datetime.utcnow()
+                    run_record.error_details = str(e)
+                    db.commit()
+            return {"status": "failed", "errors": [str(e)]}
 
 
 orchestrator_instance = None
