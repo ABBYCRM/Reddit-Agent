@@ -43,6 +43,9 @@ class Settings(BaseSettings):
         alias="NVIDIA_EMBEDDING_MODEL"
     )
 
+    # Composio
+    composio_api_key: Optional[str] = Field(default=None, alias="COMPOSIO_API_KEY")
+
     # Database
     database_url: str = Field(
         default="postgresql://user:pass@localhost:5432/caseclosed_agent",
