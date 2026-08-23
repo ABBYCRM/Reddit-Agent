@@ -88,11 +88,9 @@ class RAGEngine:
     ):
         """Index a Reddit post/comment into the vector store."""
         # Prepare document
-        doc_text = f"Subreddit: r/{subreddit}
-"
+        doc_text = f"Subreddit: r/{subreddit}\n"
         if title:
-            doc_text += f"Title: {title}
-"
+            doc_text += f"Title: {title}\n"
         doc_text += f"Content: {body[:2000]}"
 
         metadata = {
