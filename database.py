@@ -1,6 +1,6 @@
 """
 CaseClosedFL Reddit Agent - Database Layer
-PostgreSQL with SQLAlchemy 2.0 + pgvector for embeddings
+SQLite/PostgreSQL compatible with SQLAlchemy 2.0
 """
 from datetime import datetime
 from typing import Optional, List
@@ -9,20 +9,23 @@ from sqlalchemy import (
     Float, Boolean, ForeignKey, JSON, Index, func
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
-from sqlalchemy.dialects.postgresql import UUID
 import uuid
 
 from config import get_settings
 
 settings = get_settings()
 
+# Detect database type
+is_sqlite = settings.database_url.startswith("sqlite")
+
 # Engine with connection pooling
 engine = create_engine(
     settings.database_url,
-    pool_size=10,
-    max_overflow=20,
+    pool_size=10 if not is_sqlite else 0,
+    max_overflow=20 if not is_sqlite else 0,
     pool_pre_ping=True,
-    echo=False
+    echo=False,
+    connect_args={"check_same_thread": False} if is_sqlite else {}
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -35,16 +38,16 @@ class Lead(Base):
     """Qualified lead extracted from Reddit engagement."""
     __tablename__ = "leads"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     reddit_username = Column(String(50), nullable=False, index=True)
     reddit_post_id = Column(String(20), nullable=False, index=True)
     reddit_comment_id = Column(String(20), nullable=True)
     subreddit = Column(String(50), nullable=False, index=True)
 
     # Lead scoring
-    intent_score = Column(Float, default=0.0)  # 0-100
-    qualification_score = Column(Float, default=0.0)  # 0-100
-    lead_temperature = Column(String(20), default="cold")  # cold/warm/hot
+    intent_score = Column(Float, default=0.0)
+    qualification_score = Column(Float, default=0.0)
+    lead_temperature = Column(String(20), default="cold")
 
     # Extracted info
     accident_type = Column(String(100), nullable=True)
@@ -55,11 +58,11 @@ class Lead(Base):
 
     # Contact (only collected if user volunteers)
     contact_volunteered = Column(Boolean, default=False)
-    contact_method = Column(String(20), nullable=True)  # dm, comment, email
+    contact_method = Column(String(20), nullable=True)
     contact_value = Column(String(500), nullable=True)
 
     # Status workflow
-    status = Column(String(50), default="new")  # new, contacted, qualified, converted, dead
+    status = Column(String(50), default="new")
     assigned_to = Column(String(100), nullable=True)
     notes = Column(Text, nullable=True)
 
@@ -81,10 +84,10 @@ class Engagement(Base):
     """Every interaction with a Reddit user."""
     __tablename__ = "engagements"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    lead_id = Column(UUID(as_uuid=True), ForeignKey("leads.id"), nullable=False)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    lead_id = Column(String(36), ForeignKey("leads.id"), nullable=False)
 
-    engagement_type = Column(String(50), nullable=False)  # comment, dm, mention, upvote
+    engagement_type = Column(String(50), nullable=False)
     reddit_post_id = Column(String(20), nullable=False)
     reddit_comment_id = Column(String(20), nullable=True)
     subreddit = Column(String(50), nullable=False)
@@ -120,14 +123,14 @@ class MonitoredPost(Base):
     """Posts we are actively watching for replies."""
     __tablename__ = "monitored_posts"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     reddit_post_id = Column(String(20), nullable=False, unique=True, index=True)
     subreddit = Column(String(50), nullable=False, index=True)
     post_title = Column(Text, nullable=False)
     post_author = Column(String(50), nullable=True)
 
     monitoring_reason = Column(String(200), nullable=True)
-    priority = Column(Integer, default=1)  # 1-5
+    priority = Column(Integer, default=1)
 
     is_active = Column(Boolean, default=True)
     last_checked_at = Column(DateTime, nullable=True)
@@ -141,35 +144,30 @@ class RedditBundle(Base):
     """RAG storage for Reddit posts/comments indexed for retrieval."""
     __tablename__ = "reddit_bundles"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     reddit_id = Column(String(20), nullable=False, unique=True, index=True)
     subreddit = Column(String(50), nullable=False, index=True)
-    content_type = Column(String(20), nullable=False)  # post, comment
+    content_type = Column(String(20), nullable=False)
     title = Column(Text, nullable=True)
     body = Column(Text, nullable=False)
     author = Column(String(50), nullable=True)
 
-    # Embedding metadata
     embedding_model = Column(String(100), nullable=True)
     token_count = Column(Integer, nullable=True)
 
-    # Engagement metrics at time of indexing
     score = Column(Integer, default=0)
     num_comments = Column(Integer, default=0)
 
-    # Classification
     intent_tags = Column(JSON, default=list)
     location_tags = Column(JSON, default=list)
     accident_type_tags = Column(JSON, default=list)
 
-    # Timestamps
     reddit_created_utc = Column(DateTime, nullable=True)
     indexed_at = Column(DateTime, default=datetime.utcnow)
     last_retrieved_at = Column(DateTime, nullable=True)
 
     __table_args__ = (
         Index("idx_bundles_subreddit", "subreddit", "content_type"),
-        Index("idx_bundles_tags", "intent_tags", postgresql_using="gin"),
     )
 
 
@@ -177,11 +175,11 @@ class AgentRun(Base):
     """Audit log for every agent execution cycle."""
     __tablename__ = "agent_runs"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     agent_name = Column(String(100), nullable=False, index=True)
-    run_type = Column(String(50), nullable=False)  # discovery, engagement, monitor, heartbeat
+    run_type = Column(String(50), nullable=False)
 
-    status = Column(String(50), default="running")  # running, success, failed
+    status = Column(String(50), default="running")
     started_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
 
@@ -201,9 +199,9 @@ class SafetyLog(Base):
     """Compliance and safety event logging."""
     __tablename__ = "safety_logs"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     event_type = Column(String(100), nullable=False, index=True)
-    severity = Column(String(20), default="info")  # info, warning, critical
+    severity = Column(String(20), default="info")
 
     description = Column(Text, nullable=False)
     reddit_post_id = Column(String(20), nullable=True)
@@ -217,7 +215,7 @@ class SafetyLog(Base):
 
 # ─── Database Utilities ─────────────────────────────────────────────────
 
-def get_db() -> Session:
+def get_db():
     """Dependency for FastAPI to get DB session."""
     db = SessionLocal()
     try:
