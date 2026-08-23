@@ -1,352 +1,150 @@
-"""
-CaseClosedFL Reddit Agent - Safety & Compliance Guardrails
-Realistic safety parameters for Reddit ToS compliance, Florida bar rules,
-and ethical lead generation. No AI-bs safety theater.
-"""
-import re
+"""Deterministic compliance checks run before any outbound Reddit action."""
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from config import get_settings
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
 
 @dataclass
 class SafetyCheck:
-    """Result of a safety/compliance check."""
     passed: bool
     rule_name: str
-    severity: str  # info, warning, critical
+    severity: str
     message: str
-    action: str  # allow, flag, block
+    action: str
 
 
 class SafetyGuardrails:
-    """
-    Production safety layer. These are REAL guardrails, not theater.
-
-    Covers:
-    1. Reddit ToS compliance (no spam, no ban evasion)
-    2. Florida Bar advertising rules (no legal advice, no solicitation)
-    3. CaseClosedFL business rules (no existing attorney clients)
-    4. Content quality (no low-effort responses)
-    """
-
-    # Patterns that indicate user already has an attorney
     HAS_ATTORNEY_PATTERNS = [
-        r"my attorney", r"my lawyer", r"represented by",
-        r"legal counsel", r"hired a lawyer", r"hired an attorney",
-        r"retained.*(lawyer|attorney)", r"my firm",
-        r"speaking with my attorney", r"my legal team"
+        r"\bmy attorney\b", r"\bmy lawyer\b", r"\brepresented by\b",
+        r"\blegal counsel\b", r"\bhired (?:a|an) (?:lawyer|attorney)\b",
+        r"\bretained\b.*\b(?:lawyer|attorney)\b", r"\bmy firm\b", r"\bmy legal team\b",
     ]
-
-    # Patterns that indicate this is a legal advice request (not for us)
     LEGAL_ADVICE_PATTERNS = [
-        r"should I sue", r"can I sue", r"do I have a case",
-        r"what are my rights", r"what should I do legally",
-        r"is this illegal", r"can they do this legally"
+        r"\bshould i sue\b", r"\bcan i sue\b", r"\bdo i have a case\b",
+        r"\bwhat are my rights\b", r"\bwhat should i do legally\b",
+        r"\bis this illegal\b", r"\bcan they do this legally\b",
     ]
-
-    # Spam / low quality indicators
     SPAM_PATTERNS = [
-        r"click here", r"DM me", r"message me",
-        r"free consultation.*now", r"limited time",
-        r"act now", r"guaranteed.*win", r"millions"
+        r"\bclick here\b", r"\bdm me\b", r"\bmessage me\b",
+        r"\bfree consultation\b.*\bnow\b", r"\blimited time\b", r"\bact now\b",
+        r"\bguaranteed\b.*\bwin\b", r"\bmillions\b",
     ]
-
-    # Subreddits we should NEVER post in (protected communities)
     BLOCKED_SUBREDDITS = {
-        "suicidewatch", "depression", "addiction", "domesticviolence",
-        "rape", "ptsd", "grief", "bereavement", "mentalhealth",
-        "personalfinance"  # Only monitor, never solicit
+        "suicidewatch", "depression", "addiction", "domesticviolence", "rape",
+        "ptsd", "grief", "bereavement", "mentalhealth", "personalfinance",
     }
-
-    # Required disclaimer phrases
-    REQUIRED_DISCLAIMERS = [
-        "not a law firm",
-        "not legal advice",
-        "general information"
-    ]
+    REQUIRED_DISCLAIMERS = ("not a law firm", "not legal advice", "general information")
+    ALLOWED_HOSTS = {"caseclosedfl.com", "www.caseclosedfl.com", "reddit.com", "www.reddit.com"}
 
     def __init__(self):
+        self.settings = get_settings()
         self._daily_blocks = 0
         self._daily_flags = 0
-        self._last_reset = datetime.utcnow().date()
+        self._last_reset = datetime.now(timezone.utc).date()
 
     def _check_reset(self):
-        """Reset daily counters at midnight."""
-        today = datetime.utcnow().date()
+        today = datetime.now(timezone.utc).date()
         if today != self._last_reset:
-            self._daily_blocks = 0
-            self._daily_flags = 0
+            self._daily_blocks = self._daily_flags = 0
             self._last_reset = today
 
-    def check_post_eligibility(
-        self,
-        post_title: str,
-        post_body: str,
-        subreddit: str,
-        author_info: Optional[Dict] = None
-    ) -> List[SafetyCheck]:
-        """
-        Run full eligibility check on a post before any engagement.
-        Returns list of checks - ALL must pass for engagement.
-        """
+    def check_post_eligibility(self, post_title: str, post_body: str, subreddit: str,
+                               author_info: Optional[Dict] = None) -> List[SafetyCheck]:
         self._check_reset()
-        checks = []
         text = f"{post_title} {post_body}".lower()
-
-        # 1. Subreddit blocklist
-        if subreddit.lower() in self.BLOCKED_SUBREDDITS:
-            checks.append(SafetyCheck(
-                passed=False,
-                rule_name="blocked_subreddit",
-                severity="critical",
-                message=f"r/{subreddit} is in the protected community list",
-                action="block"
-            ))
+        checks: List[SafetyCheck] = []
+        blocked = subreddit.lower() in self.BLOCKED_SUBREDDITS
+        checks.append(SafetyCheck(not blocked, "subreddit_allowed", "critical" if blocked else "info",
+                                  "Protected community" if blocked else "Subreddit is allowed", "block" if blocked else "allow"))
+        if blocked:
             self._daily_blocks += 1
-        else:
-            checks.append(SafetyCheck(
-                passed=True,
-                rule_name="subreddit_allowed",
-                severity="info",
-                message=f"r/{subreddit} is allowed",
-                action="allow"
-            ))
-
-        # 2. Check if user already has an attorney
-        has_attorney = any(re.search(p, text, re.I) for p in self.HAS_ATTORNEY_PATTERNS)
+        has_attorney = any(re.search(pattern, text, re.I) for pattern in self.HAS_ATTORNEY_PATTERNS)
+        checks.append(SafetyCheck(not has_attorney, "no_existing_attorney", "critical",
+                                  "Existing representation detected" if has_attorney else "No existing representation detected",
+                                  "block" if has_attorney else "allow"))
         if has_attorney:
-            checks.append(SafetyCheck(
-                passed=False,
-                rule_name="existing_attorney",
-                severity="critical",
-                message="User appears to already have legal representation",
-                action="block"
-            ))
             self._daily_blocks += 1
-        else:
-            checks.append(SafetyCheck(
-                passed=True,
-                rule_name="no_existing_attorney",
-                severity="info",
-                message="No indication of existing attorney",
-                action="allow"
-            ))
-
-        # 3. Check account age (if info available)
         if author_info and "account_age_days" in author_info:
-            age = author_info["account_age_days"]
-            if age < settings.min_account_age_days:
-                checks.append(SafetyCheck(
-                    passed=False,
-                    rule_name="account_too_new",
-                    severity="warning",
-                    message=f"Account age ({age}d) below minimum ({settings.min_account_age_days}d)",
-                    action="flag"
-                ))
+            too_new = int(author_info["account_age_days"]) < self.settings.min_account_age_days
+            checks.append(SafetyCheck(not too_new, "account_age_ok", "warning",
+                                      "Account is below minimum age" if too_new else "Account age is acceptable",
+                                      "flag" if too_new else "allow"))
+            if too_new:
                 self._daily_flags += 1
-            else:
-                checks.append(SafetyCheck(
-                    passed=True,
-                    rule_name="account_age_ok",
-                    severity="info",
-                    message=f"Account age acceptable ({age}d)",
-                    action="allow"
-                ))
-
-        # 4. Check for legal advice requests (we do not answer these)
-        seeks_legal_advice = any(re.search(p, text, re.I) for p in self.LEGAL_ADVICE_PATTERNS)
-        if seeks_legal_advice:
-            checks.append(SafetyCheck(
-                passed=False,
-                rule_name="seeks_legal_advice",
-                severity="critical",
-                message="Post is requesting specific legal advice - we cannot answer",
-                action="block"
-            ))
+        seeks_advice = any(re.search(pattern, text, re.I) for pattern in self.LEGAL_ADVICE_PATTERNS)
+        checks.append(SafetyCheck(not seeks_advice, "no_legal_advice_request", "critical",
+                                  "Specific legal advice requested" if seeks_advice else "No specific legal advice requested",
+                                  "block" if seeks_advice else "allow"))
+        if seeks_advice:
             self._daily_blocks += 1
-        else:
-            checks.append(SafetyCheck(
-                passed=True,
-                rule_name="no_legal_advice_request",
-                severity="info",
-                message="Post does not request specific legal advice",
-                action="allow"
-            ))
-
-        # 5. Florida relevance check
-        florida_indicators = ["florida", "fl", "miami", "orlando", "tampa", "jacksonville", 
-                           "fort lauderdale", "west palm beach", "broward", "dade", "orange county",
-                           "hillsborough", "pinellas", "palm beach county"]
-        is_florida_relevant = any(ind in text for ind in florida_indicators)
-
-        if not is_florida_relevant:
-            # Not a hard block, but flag as low priority
-            checks.append(SafetyCheck(
-                passed=True,
-                rule_name="florida_relevance",
-                severity="warning",
-                message="No clear Florida location indicator - will score lower",
-                action="flag"
-            ))
+        florida = re.search(r"\b(?:florida|fl|miami|orlando|tampa|jacksonville|broward|dade|pinellas)\b", text, re.I)
+        checks.append(SafetyCheck(True, "florida_relevance", "info" if florida else "warning",
+                                  "Florida location detected" if florida else "No clear Florida location indicator", "allow" if florida else "flag"))
+        if not florida:
             self._daily_flags += 1
-        else:
-            checks.append(SafetyCheck(
-                passed=True,
-                rule_name="florida_relevant",
-                severity="info",
-                message="Florida location detected",
-                action="allow"
-            ))
-
         return checks
 
     def check_response_compliance(self, response_text: str) -> List[SafetyCheck]:
-        """
-        Verify a crafted response meets all compliance requirements
-        BEFORE sending to Reddit.
-        """
         self._check_reset()
-        checks = []
-        text_lower = response_text.lower()
-
-        # 1. Required disclaimers
-        has_disclaimer = any(phrase in text_lower for phrase in self.REQUIRED_DISCLAIMERS)
-        if not has_disclaimer:
-            checks.append(SafetyCheck(
-                passed=False,
-                rule_name="missing_disclaimer",
-                severity="critical",
-                message="Response missing required legal disclaimer",
-                action="block"
-            ))
+        text = response_text.lower()
+        checks: List[SafetyCheck] = []
+        missing = [phrase for phrase in self.REQUIRED_DISCLAIMERS if phrase not in text]
+        checks.append(SafetyCheck(not missing, "has_disclaimer", "critical",
+                                  f"Missing disclosure phrases: {', '.join(missing)}" if missing else "Complete disclosure present",
+                                  "block" if missing else "allow"))
+        if missing:
             self._daily_blocks += 1
-        else:
-            checks.append(SafetyCheck(
-                passed=True,
-                rule_name="has_disclaimer",
-                severity="info",
-                message="Required disclaimer present",
-                action="allow"
-            ))
-
-        # 2. No legal advice claims
-        legal_advice_claims = [
-            r"you should.*(sue|file|claim)",
-            r"you have a case", r"you will win",
-            r"you are entitled to.*\$",
-            r"your case is worth"
-        ]
-        gives_advice = any(re.search(p, text_lower) for p in legal_advice_claims)
-        if gives_advice:
-            checks.append(SafetyCheck(
-                passed=False,
-                rule_name="gives_legal_advice",
-                severity="critical",
-                message="Response contains specific legal advice or predictions",
-                action="block"
-            ))
+        advice = any(re.search(pattern, text, re.I) for pattern in [
+            r"\byou should\b.*\b(?:sue|file|claim)\b", r"\byou have a case\b",
+            r"\byou will win\b", r"\byou are entitled to\b.*\$", r"\byour case is worth\b",
+        ])
+        checks.append(SafetyCheck(not advice, "no_legal_advice", "critical",
+                                  "Specific legal advice detected" if advice else "No specific legal advice detected",
+                                  "block" if advice else "allow"))
+        spam = any(re.search(pattern, text, re.I) for pattern in self.SPAM_PATTERNS)
+        checks.append(SafetyCheck(not spam, "no_spam", "critical",
+                                  "Spam language detected" if spam else "No spam language detected",
+                                  "block" if spam else "allow"))
+        if advice or spam:
             self._daily_blocks += 1
-        else:
-            checks.append(SafetyCheck(
-                passed=True,
-                rule_name="no_legal_advice",
-                severity="info",
-                message="No specific legal advice detected",
-                action="allow"
-            ))
-
-        # 3. No spam patterns
-        spam_detected = any(re.search(p, text_lower) for p in self.SPAM_PATTERNS)
-        if spam_detected:
-            checks.append(SafetyCheck(
-                passed=False,
-                rule_name="spam_detected",
-                severity="critical",
-                message="Response contains spam-like language",
-                action="block"
-            ))
-            self._daily_blocks += 1
-        else:
-            checks.append(SafetyCheck(
-                passed=True,
-                rule_name="no_spam",
-                severity="info",
-                message="No spam patterns detected",
-                action="allow"
-            ))
-
-        # 4. Response length check
-        word_count = len(response_text.split())
-        if word_count > 200:
-            checks.append(SafetyCheck(
-                passed=False,
-                rule_name="response_too_long",
-                severity="warning",
-                message=f"Response too long ({word_count} words, max 200)",
-                action="flag"
-            ))
+        too_long = len(response_text.split()) > 200
+        checks.append(SafetyCheck(not too_long, "response_length_ok", "warning",
+                                  "Response exceeds 200 words" if too_long else "Response length acceptable",
+                                  "flag" if too_long else "allow"))
+        if too_long:
             self._daily_flags += 1
-        else:
-            checks.append(SafetyCheck(
-                passed=True,
-                rule_name="response_length_ok",
-                severity="info",
-                message=f"Response length acceptable ({word_count} words)",
-                action="allow"
-            ))
-
-        # 5. URL check - only allow caseclosedfl.com
-        urls = re.findall(r'https?://[^\s]+', response_text)
-        bad_urls = [u for u in urls if "caseclosedfl.com" not in u and "reddit.com" not in u]
-        if bad_urls:
-            checks.append(SafetyCheck(
-                passed=False,
-                rule_name="unauthorized_url",
-                severity="critical",
-                message=f"Response contains unauthorized URL: {bad_urls[0]}",
-                action="block"
-            ))
+        invalid_urls = []
+        for raw in re.findall(r"https?://[^\s)\]]+", response_text):
+            host = (urlparse(raw.rstrip(".,")).hostname or "").lower()
+            if host not in self.ALLOWED_HOSTS:
+                invalid_urls.append(raw)
+        checks.append(SafetyCheck(not invalid_urls, "urls_allowed", "critical",
+                                  f"Unauthorized URL: {invalid_urls[0]}" if invalid_urls else "All URLs are authorized",
+                                  "block" if invalid_urls else "allow"))
+        if invalid_urls:
             self._daily_blocks += 1
-        else:
-            checks.append(SafetyCheck(
-                passed=True,
-                rule_name="urls_allowed",
-                severity="info",
-                message="All URLs are authorized",
-                action="allow"
-            ))
-
         return checks
 
-    def can_proceed(self, checks: List[SafetyCheck]) -> Tuple[bool, List[str]]:
-        """
-        Determine if engagement can proceed based on checks.
-        Returns (can_proceed, list_of_blocking_reasons).
-        """
-        blocking = [c for c in checks if c.action == "block" and not c.passed]
-        if blocking:
-            return False, [f"{c.rule_name}: {c.message}" for c in blocking]
-        return True, []
+    @staticmethod
+    def can_proceed(checks: List[SafetyCheck]) -> Tuple[bool, List[str]]:
+        blocking = [check for check in checks if not check.passed and check.action == "block"]
+        return not blocking, [f"{check.rule_name}: {check.message}" for check in blocking]
 
     def get_stats(self) -> Dict[str, Any]:
         self._check_reset()
-        return {
-            "daily_blocks": self._daily_blocks,
-            "daily_flags": self._daily_flags,
-            "blocked_subreddits": list(self.BLOCKED_SUBREDDITS),
-            "min_account_age_days": settings.min_account_age_days,
-            "florida_bar_compliant": settings.florida_bar_compliant
-        }
+        return {"daily_blocks": self._daily_blocks, "daily_flags": self._daily_flags,
+                "blocked_subreddits": sorted(self.BLOCKED_SUBREDDITS),
+                "min_account_age_days": self.settings.min_account_age_days,
+                "florida_bar_compliant": self.settings.florida_bar_compliant}
 
 
-# Singleton
 _guardrails: Optional[SafetyGuardrails] = None
 
 
