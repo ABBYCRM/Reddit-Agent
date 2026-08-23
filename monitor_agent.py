@@ -85,6 +85,8 @@ class MonitorAgent:
         except Exception as e:
             logger.error(f"Monitor agent failed: {e}")
             raise
+        finally:
+            db.close()
 
     async def add_monitor(self, post_id: str, subreddit: str, title: str,
                          priority: int = 1, reason: str = "") -> bool:
@@ -120,6 +122,8 @@ class MonitorAgent:
         except Exception as e:
             logger.error(f"Failed to add monitor for {post_id}: {e}")
             return False
+        finally:
+            db.close()
 
     async def run(self) -> Dict[str, Any]:
         """Full monitoring cycle."""

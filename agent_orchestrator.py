@@ -113,7 +113,7 @@ class AgentOrchestrator:
         try:
             results = await self.qualifier.run_daily_qualification()
             state["qualifier_results"] = results
-            state["status"] = "success"
+            state["status"] = "failed" if state["errors"] else "success"
         except Exception as e:
             state["errors"].append(f"qualify: {str(e)}")
             state["status"] = "failed"

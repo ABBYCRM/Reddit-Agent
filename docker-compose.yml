@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   app:
     build: .
@@ -9,49 +7,17 @@ services:
       - "8000:8000"
     env_file:
       - .env
-    depends_on:
-      - postgres
-      - redis
-    volumes:
-      - ./chroma_db:/app/chroma_db
-      - ./agent.log:/app/agent.log
-    command: uvicorn api:app --host 0.0.0.0 --port 8000 --workers 1
-
-  worker:
-    build: .
-    container_name: caseclosed-worker
-    restart: unless-stopped
-    env_file:
-      - .env
-    depends_on:
-      - postgres
-      - redis
-    volumes:
-      - ./chroma_db:/app/chroma_db
-    command: python run.py
-
-  postgres:
-    image: ankane/pgvector:latest
-    container_name: caseclosed-postgres
-    restart: unless-stopped
     environment:
-      POSTGRES_USER: caseclosed
-      POSTGRES_PASSWORD: caseclosed_secret_2026
-      POSTGRES_DB: caseclosed_agent
-    ports:
-      - "5432:5432"
+      DATABASE_URL: sqlite:////app/data/caseclosed.db
+      CHROMA_PERSIST_DIR: /app/data/chroma_db
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-  redis:
-    image: redis:7-alpine
-    container_name: caseclosed-redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
+      - app_data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
 volumes:
-  postgres_data:
-  redis_data:
+  app_data:

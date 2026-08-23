@@ -35,10 +35,16 @@ class NVIDIAClient:
     """
 
     def __init__(self):
-        self.client = AsyncOpenAI(
-            base_url=settings.nvidia_base_url,
-            api_key=settings.nvidia_api_key,
+        self._configured = bool(
+            settings.nvidia_api_key
+            and settings.nvidia_api_key != "nvapi-your-nvidia-key"
         )
+        self.client: Optional[AsyncOpenAI] = None
+        if self._configured:
+            self.client = AsyncOpenAI(
+                base_url=settings.nvidia_base_url,
+                api_key=settings.nvidia_api_key,
+            )
         self.model = settings.nvidia_model
         self.embedding_model = settings.nvidia_embedding_model
         self._request_count = 0
@@ -67,6 +73,9 @@ class NVIDIAClient:
             model: Override default model
         """
         model = model or self.model
+
+        if not self._configured:
+            raise RuntimeError("NVIDIA_API_KEY is not configured")
 
         kwargs = {
             "model": model,
@@ -106,6 +115,8 @@ class NVIDIAClient:
     )
     async def embed(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for texts using NVIDIA embedding model."""
+        if not self._configured:
+            raise RuntimeError("NVIDIA_API_KEY is not configured")
         try:
             response = await self.client.embeddings.create(
                 model=self.embedding_model,
@@ -172,10 +183,12 @@ Analyze this post for personal injury lead potential."""
         response = await self.chat(messages, temperature=0.1, json_mode=True)
 
         try:
-            result = json.loads(response.content)
+            result = json.loads(response.content or "")
+            if not isinstance(result, dict):
+                raise ValueError("Expected a JSON object")
             return result
-        except json.JSONDecodeError:
-            logger.error(f"Failed to parse JSON from LLM: {response.content[:500]}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            logger.error(f"Failed to parse JSON from LLM: {(response.content or '')[:500]}")
             return {
                 "intent_score": 0,
                 "qualification_score": 0,
@@ -248,9 +261,11 @@ Craft a helpful, compliant response."""
         response = await self.chat(messages, temperature=0.4, max_tokens=500, json_mode=True)
 
         try:
-            result = json.loads(response.content)
+            result = json.loads(response.content or "")
+            if not isinstance(result, dict):
+                raise ValueError("Expected a JSON object")
             return result
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError, ValueError):
             return {
                 "response_text": "I understand you're going through a difficult situation. CaseClosedFL offers a free eligibility check for Florida accident cases at caseclosedfl.com. We're not a law firm, but we can help connect you with resources. This is general information, not legal advice.",
                 "safety_score": 80,
@@ -281,9 +296,11 @@ Generate search queries."""
         response = await self.chat(messages, temperature=0.7, json_mode=True)
 
         try:
-            result = json.loads(response.content)
+            result = json.loads(response.content or "")
+            if not isinstance(result, dict):
+                raise ValueError("Expected a JSON object")
             return result.get("queries", topics)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError, ValueError):
             return topics
 
     def get_stats(self) -> Dict[str, Any]:

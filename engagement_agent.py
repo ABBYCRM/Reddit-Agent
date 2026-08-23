@@ -47,6 +47,7 @@ class EngagementAgent:
             "lead_created": False,
             "errors": []
         }
+        db = None
 
         try:
             # Step 1: Get context from RAG
@@ -145,6 +146,9 @@ class EngagementAgent:
             logger.error(f"Engagement failed for {post_data['reddit_id']}: {e}")
             result["errors"].append(str(e))
             return result
+        finally:
+            if db is not None:
+                db.close()
 
     async def run(self, high_intent_posts: list) -> Dict[str, Any]:
         """Run engagement cycle on a batch of posts."""

@@ -62,13 +62,13 @@ class QualifierAgent:
         contact = {}
 
         # Email pattern
-        email_pattern = r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}'
+        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b'
         emails = re.findall(email_pattern, text)
         if emails:
             contact["email"] = emails[0]
 
         # Phone pattern (US)
-        phone_pattern = r'\d{3}[-.]?\d{3}[-.]?\d{4}'
+        phone_pattern = r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b'
         phones = re.findall(phone_pattern, text)
         if phones:
             contact["phone"] = phones[0]
@@ -129,6 +129,7 @@ class QualifierAgent:
             except Exception as e:
                 logger.error(f"Error processing reply {reply['reply_id']}: {e}")
 
+        db.close()
         return results
 
     async def run_daily_qualification(self) -> Dict[str, Any]:
@@ -162,8 +163,11 @@ class QualifierAgent:
             lead.qualification_score = new_score
             results["leads_scored"] += 1
 
-        db.commit()
-        return results
+        try:
+            db.commit()
+            return results
+        finally:
+            db.close()
 
 
 qualifier_agent_instance = None

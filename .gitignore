@@ -49,6 +49,9 @@ coverage.xml
 *.py.cover
 .hypothesis/
 .pytest_cache/
+.deps/
+data/
+chroma_db/
 cover/
 
 # Translations

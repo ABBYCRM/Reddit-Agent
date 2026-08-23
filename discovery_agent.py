@@ -62,6 +62,7 @@ class DiscoveryAgent:
         6. Log results
         """
         run_id = None
+        db = None
         try:
             db = get_db_session()
             run_record = AgentRun(
@@ -176,6 +177,8 @@ class DiscoveryAgent:
                             "reddit_id": post.id,
                             "subreddit": str(post.subreddit),
                             "title": post.title,
+                            "body": post.selftext or "",
+                            "author": str(post.author) if post.author else "deleted",
                             "intent_score": intent_score,
                             "qualification_score": analysis.get("qualification_score", 0),
                             "lead_temperature": analysis.get("lead_temperature", "cold"),
@@ -212,14 +215,20 @@ class DiscoveryAgent:
         except Exception as e:
             logger.error(f"Discovery agent failed: {e}")
             if run_id:
-                db = get_db_session()
-                run_record = db.query(AgentRun).filter(AgentRun.id == run_id).first()
-                if run_record:
-                    run_record.status = "failed"
-                    run_record.completed_at = datetime.utcnow()
-                    run_record.error_details = str(e)
-                    db.commit()
+                failure_db = get_db_session()
+                try:
+                    run_record = failure_db.query(AgentRun).filter(AgentRun.id == run_id).first()
+                    if run_record:
+                        run_record.status = "failed"
+                        run_record.completed_at = datetime.utcnow()
+                        run_record.error_details = str(e)
+                        failure_db.commit()
+                finally:
+                    failure_db.close()
             raise
+        finally:
+            if db is not None:
+                db.close()
 
 
 # Singleton

@@ -1,307 +1,350 @@
-"""
-CaseClosedFL Reddit Agent - End-to-End Tests
-Run 3x line-by-line verification as required.
-Tests full agent pipeline without external API calls (mocked).
-"""
-import pytest
-import asyncio
+"""Deterministic tests for the Reddit agent's core and orchestration flows."""
+import math
+import os
 from datetime import datetime
-from unittest.mock import Mock, AsyncMock, patch, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
-# Import all modules for testing
+import pytest
+
+os.environ.setdefault("APP_ENV", "test")
+os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+os.environ.setdefault("CHROMA_PERSIST_DIR", "./data/test-chroma")
+
+from agent_orchestrator import AgentOrchestrator
 from config import Settings
-from database import Lead, Engagement, MonitoredPost, RedditBundle, AgentRun
-from safety_guardrails import SafetyGuardrails, SafetyCheck
+from database import Engagement, Lead, SessionLocal, init_db
+from nvidia_llm import LLMResponse, NVIDIAClient
+from qualifier_agent import QualifierAgent
+from rag_engine import RAGEngine
 from reddit_client import RedditRateLimiter
+from safety_guardrails import SafetyCheck, SafetyGuardrails
+
+
+class TestSettings:
+    def test_csv_settings_are_parsed_and_credentials_are_optional(self):
+        settings = Settings(
+            _env_file=None,
+            TARGET_SUBREDDITS="florida, Miami, ,tampa",
+            TARGET_CITIES="Miami,Orlando",
+        )
+
+        assert settings.reddit_client_id is None
+        assert settings.nvidia_api_key is None
+        assert settings.target_subreddits_list == ["florida", "Miami", "tampa"]
+        assert settings.target_cities_list == ["Miami", "Orlando"]
 
 
 class TestRateLimiter:
-    """Test 1: Reddit Rate Limiting (Line-by-line)"""
-
-    def test_token_refill(self):
+    def test_token_refill(self, monkeypatch):
         limiter = RedditRateLimiter(max_qpm=60, burst_buffer=5)
         limiter.tokens = 0
-        limiter.last_update = datetime.utcnow().timestamp() - 60
-        limiter._refill_tokens()
-        assert limiter.tokens == 60  # Full refill after 60 seconds
+        limiter.last_update = 1_000.0
+        monkeypatch.setattr("reddit_client.time.time", lambda: 1_060.0)
 
-    def test_acquire_consumes_tokens(self):
+        limiter._refill_tokens()
+
+        assert limiter.tokens == 60
+
+    def test_acquire_consumes_tokens(self, monkeypatch):
         limiter = RedditRateLimiter(max_qpm=60, burst_buffer=5)
         limiter.tokens = 10
-        limiter.last_update = datetime.utcnow().timestamp()
-        result = limiter.acquire(tokens=1)
-        assert result is True
+        limiter.last_update = 1_000.0
+        monkeypatch.setattr("reddit_client.time.time", lambda: 1_000.0)
+
+        assert limiter.acquire(tokens=1) is True
         assert limiter.tokens == 9
 
     def test_rate_limit_state_near_limit(self):
-        limiter = RedditRateLimiter(max_qpm=60, burst_buffer=5)
+        limiter = RedditRateLimiter(max_qpm=60, burst_buffer=2)
         limiter.rate_limit_state.remaining = 3
+
+        assert limiter.rate_limit_state.is_near_limit is False
+
+        limiter.rate_limit_state.remaining = 2
         assert limiter.rate_limit_state.is_near_limit is True
 
 
 class TestSafetyGuardrails:
-    """Test 2: Safety & Compliance (Line-by-line)"""
-
     def test_blocked_subreddit(self):
-        guardrails = SafetyGuardrails()
-        checks = guardrails.check_post_eligibility(
+        checks = SafetyGuardrails().check_post_eligibility(
             post_title="Help after car crash",
             post_body="I was rear ended in Miami",
-            subreddit="suicidewatch"
+            subreddit="suicidewatch",
         )
-        blocked = [c for c in checks if c.rule_name == "blocked_subreddit" and not c.passed]
-        assert len(blocked) == 1
+
+        assert any(
+            check.rule_name == "blocked_subreddit" and not check.passed
+            for check in checks
+        )
 
     def test_existing_attorney_detection(self):
-        guardrails = SafetyGuardrails()
-        checks = guardrails.check_post_eligibility(
+        checks = SafetyGuardrails().check_post_eligibility(
             post_title="My attorney says...",
             post_body="My lawyer told me to file by Friday",
-            subreddit="legaladvice"
+            subreddit="legaladvice",
         )
-        blocked = [c for c in checks if c.rule_name == "existing_attorney" and not c.passed]
-        assert len(blocked) == 1
+
+        assert any(
+            check.rule_name == "existing_attorney" and not check.passed
+            for check in checks
+        )
 
     def test_response_compliance_missing_disclaimer(self):
-        guardrails = SafetyGuardrails()
-        checks = guardrails.check_response_compliance(
-            "You should definitely sue them for 1 million dollars. Contact me."
+        checks = SafetyGuardrails().check_response_compliance(
+            "You should definitely sue them for 1 million dollars. Click here."
         )
-        blocked = [c for c in checks if not c.passed]
-        assert len(blocked) >= 2  # Missing disclaimer + gives legal advice + spam
+
+        rules = {check.rule_name for check in checks if not check.passed}
+        assert {"missing_disclaimer", "gives_legal_advice", "spam_detected"} <= rules
+
+    def test_response_requires_every_disclaimer_phrase(self):
+        checks = SafetyGuardrails().check_response_compliance(
+            "CaseClosedFL is not a law firm. This is general information."
+        )
+
+        assert any(
+            check.rule_name == "missing_disclaimer" and not check.passed
+            for check in checks
+        )
+
+    def test_url_allowlist_checks_hostname_not_substring(self):
+        checks = SafetyGuardrails().check_response_compliance(
+            "CaseClosedFL is not a law firm. This is general information, not legal "
+            "advice. Visit https://caseclosedfl.com.evil.example/collect."
+        )
+
+        assert any(
+            check.rule_name == "unauthorized_url" and not check.passed
+            for check in checks
+        )
+
+    def test_florida_abbreviation_uses_word_boundaries(self):
+        checks = SafetyGuardrails().check_post_eligibility(
+            post_title="Flowers after an accident",
+            post_body="I need general support",
+            subreddit="accidents",
+        )
+
+        assert any(
+            check.rule_name == "florida_relevance"
+            and check.severity == "warning"
+            for check in checks
+        )
 
     def test_can_proceed_logic(self):
-        guardrails = SafetyGuardrails()
         checks = [
-            SafetyCheck(passed=True, rule_name="ok", severity="info", message="ok", action="allow"),
-            SafetyCheck(passed=False, rule_name="bad", severity="critical", message="bad", action="block"),
+            SafetyCheck(True, "ok", "info", "ok", "allow"),
+            SafetyCheck(False, "bad", "critical", "bad", "block"),
         ]
-        can_go, reasons = guardrails.can_proceed(checks)
+
+        can_go, reasons = SafetyGuardrails().can_proceed(checks)
+
         assert can_go is False
-        assert len(reasons) == 1
+        assert reasons == ["bad: bad"]
+
+
+class TestQualifier:
+    def test_extract_contact_uses_real_word_boundaries(self):
+        contact = QualifierAgent().extract_contact(
+            "You can reach me at person@example.com or 305-555-0199."
+        )
+
+        assert contact == {
+            "email": "person@example.com",
+            "phone": "305-555-0199",
+        }
 
 
 class TestDatabaseModels:
-    """Test 3: Database Models (Line-by-line)"""
-
-    def test_lead_creation(self):
-        lead = Lead(
-            reddit_username="testuser",
-            reddit_post_id="abc123",
-            subreddit="florida",
-            intent_score=85.0,
-            status="new"
-        )
-        assert lead.reddit_username == "testuser"
-        assert lead.intent_score == 85.0
-        assert str(lead.id)  # UUID generated
-
-    def test_engagement_relationship(self):
-        lead = Lead(reddit_username="u", reddit_post_id="p", subreddit="r")
-        eng = Engagement(
-            lead_id=lead.id,
-            engagement_type="comment",
-            reddit_post_id="p",
-            subreddit="r",
-            our_response="test response",
-            compliance_check_passed=True
-        )
-        assert eng.engagement_type == "comment"
-        assert eng.compliance_check_passed is True
-
-
-class TestNVIDIAClientMock:
-    """Test 4: LLM Client with mocked API (Line-by-line)"""
-
-    @pytest.mark.asyncio
-    async def test_analyze_post_intent(self):
-        with patch('nvidia_llm.NVIDIAClient.chat') as mock_chat:
-            mock_chat.return_value = AsyncMock()
-            mock_chat.return_value.content = """
-            {
-                "intent_score": 85,
-                "qualification_score": 80,
-                "lead_temperature": "warm",
-                "accident_type": "car",
-                "recommended_action": "engage"
-            }
-            """
-
-            from nvidia_llm import NVIDIAClient
-            client = NVIDIAClient()
-            result = await client.analyze_post_intent(
-                "Car accident in Miami", "I was rear ended", "florida"
+    def test_lead_defaults_and_engagement_relationship(self):
+        init_db()
+        with SessionLocal() as db:
+            lead = Lead(
+                reddit_username="testuser",
+                reddit_post_id="abc123",
+                subreddit="florida",
+                intent_score=85.0,
+                source_url="https://reddit.com/r/florida/comments/abc123",
             )
+            engagement = Engagement(
+                lead=lead,
+                engagement_type="comment",
+                reddit_post_id="abc123",
+                subreddit="florida",
+                our_response="General information, not legal advice.",
+                compliance_check_passed=True,
+            )
+            db.add(engagement)
+            db.flush()
 
-            assert result["intent_score"] == 85
-            assert result["lead_temperature"] == "warm"
-            assert result["recommended_action"] == "engage"
+            assert lead.id is not None
+            assert engagement.lead is lead
+            assert engagement.lead_id == lead.id
+
+
+class TestNVIDIAClient:
+    @pytest.mark.asyncio
+    async def test_analyze_post_intent_parses_mocked_json(self):
+        client = NVIDIAClient()
+        client.chat = AsyncMock(
+            return_value=LLMResponse(
+                content='{"intent_score":85,"lead_temperature":"warm","recommended_action":"engage"}',
+                model="test-model",
+                usage={},
+                finish_reason="stop",
+            )
+        )
+
+        result = await client.analyze_post_intent(
+            "Car accident in Miami", "I was rear ended", "florida"
+        )
+
+        assert result["intent_score"] == 85
+        assert result["lead_temperature"] == "warm"
+        client.chat.assert_awaited_once()
 
 
 class TestRAGEngine:
-    """Test 5: RAG Engine (Line-by-line)"""
+    def test_local_embeddings_are_deterministic_and_normalized(self):
+        first, second = RAGEngine._local_embed(["car crash Miami", "car crash Miami"])
+
+        assert first == second
+        assert len(first) == 384
+        assert math.isclose(sum(value * value for value in first), 1.0)
 
     @pytest.mark.asyncio
-    async def test_kb_initialization(self):
-        with patch('rag_engine.RAGEngine._embed') as mock_embed:
-            mock_embed.return_value = [[0.1] * 384] * 7  # 7 KB docs
+    async def test_kb_initialization_is_idempotent(self):
+        reddit_collection = MagicMock()
+        kb_collection = MagicMock()
+        persistent_client = MagicMock()
+        persistent_client.get_or_create_collection.side_effect = [
+            reddit_collection,
+            kb_collection,
+        ]
 
-            from rag_engine import RAGEngine
+        with patch("rag_engine.chromadb.PersistentClient", return_value=persistent_client):
             engine = RAGEngine()
+            engine._embed = AsyncMock(return_value=[[0.1] * 384 for _ in range(7)])
             await engine.initialize_kb()
-            assert engine.kb_collection.count() == 7
+            await engine.initialize_kb()
+
+        assert kb_collection.upsert.call_count == 2
+        assert len(kb_collection.upsert.call_args.kwargs["ids"]) == 7
 
 
 class TestDiscoveryAgent:
-    """Test 6: Discovery Agent (Line-by-line)"""
-
     @pytest.mark.asyncio
-    async def test_run_with_mocks(self):
-        with patch('discovery_agent.get_reddit_client') as mock_reddit, \
-             patch('discovery_agent.get_nvidia_client') as mock_llm, \
-             patch('discovery_agent.get_rag_engine') as mock_rag, \
-             patch('discovery_agent.get_guardrails') as mock_guard, \
-             patch('discovery_agent.get_db_session') as mock_db:
-
-            # Setup mocks
-            mock_post = Mock()
-            mock_post.id = "test123"
-            mock_post.title = "Car crash help"
-            mock_post.selftext = "I was hit in Miami"
-            mock_post.score = 10
-            mock_post.num_comments = 5
-            mock_post.author = "testuser"
-            mock_post.subreddit = "florida"
-            mock_post.created_utc = datetime.utcnow().timestamp()
-            mock_post.permalink = "/r/florida/comments/test123"
-
-            mock_reddit.return_value.search_subreddit.return_value = [mock_post]
-
-            mock_llm.return_value.generate_search_queries.return_value = ["car accident"]
-            mock_llm.return_value.analyze_post_intent.return_value = {
+    async def test_run_with_isolated_async_mocks(self):
+        mock_post = SimpleNamespace(
+            id="test123",
+            title="Car crash help",
+            selftext="I was hit in Miami",
+            score=10,
+            num_comments=5,
+            author="testuser",
+            subreddit="florida",
+            created_utc=datetime.utcnow().timestamp(),
+            permalink="/r/florida/comments/test123",
+        )
+        reddit = MagicMock()
+        reddit.search_subreddit.return_value = [mock_post]
+        llm = MagicMock()
+        llm.generate_search_queries = AsyncMock(return_value=["car accident"])
+        llm.analyze_post_intent = AsyncMock(
+            return_value={
                 "intent_score": 90,
                 "qualification_score": 85,
                 "lead_temperature": "hot",
                 "accident_type": "car",
                 "key_phrases": ["rear ended"],
                 "location_hint": "Miami",
-                "recommended_action": "engage"
+                "recommended_action": "engage",
             }
+        )
+        rag = MagicMock()
+        rag.add_reddit_post = AsyncMock()
+        guardrails = MagicMock()
+        guardrails.check_post_eligibility.return_value = [
+            SafetyCheck(True, "subreddit", "info", "ok", "allow")
+        ]
+        guardrails.can_proceed.return_value = (True, [])
+        db = MagicMock()
 
-            mock_guard.return_value.check_post_eligibility.return_value = [
-                SafetyCheck(True, "subreddit", "info", "ok", "allow")
-            ]
-            mock_guard.return_value.can_proceed.return_value = (True, [])
-
+        with (
+            patch("discovery_agent.get_reddit_client", return_value=reddit),
+            patch("discovery_agent.get_nvidia_client", return_value=llm),
+            patch("discovery_agent.get_rag_engine", return_value=rag),
+            patch("discovery_agent.get_guardrails", return_value=guardrails),
+            patch("discovery_agent.get_db_session", return_value=db),
+        ):
             from discovery_agent import DiscoveryAgent
-            agent = DiscoveryAgent()
-            result = await agent.run()
 
-            assert result["posts_found"] == 1
-            assert len(result["high_intent_posts"]) == 1
-            assert result["high_intent_posts"][0]["intent_score"] == 90
+            result = await DiscoveryAgent().run()
+
+        assert result["posts_found"] == 1
+        assert result["high_intent_posts"][0]["body"] == "I was hit in Miami"
+        assert result["high_intent_posts"][0]["author"] == "testuser"
+        rag.add_reddit_post.assert_awaited_once()
+        db.close.assert_called_once()
 
 
 class TestEndToEndPipeline:
-    """
-    Test 7: Full E2E Pipeline (Line-by-line)
-    Simulates: Discovery -> Engagement -> Monitor -> Qualify
-    """
+    @pytest.mark.asyncio
+    async def test_full_orchestration_flow(self):
+        post = {
+            "reddit_id": "abc123",
+            "subreddit": "florida",
+            "title": "Hit by truck in Orlando",
+            "intent_score": 95,
+            "lead_temperature": "hot",
+        }
+        discovery = MagicMock()
+        discovery.run = AsyncMock(return_value={"high_intent_posts": [post]})
+        engagement = MagicMock()
+        engagement.run = AsyncMock(return_value={"processed": 1})
+        monitor = MagicMock()
+        monitor.add_monitor = AsyncMock(return_value=True)
+        monitor.run = AsyncMock(
+            return_value={"posts_checked": 1, "replies_requiring_action": []}
+        )
+        qualifier = MagicMock()
+        qualifier.run_daily_qualification = AsyncMock(return_value={"leads_scored": 1})
+
+        with (
+            patch("agent_orchestrator.get_discovery_agent", return_value=discovery),
+            patch("agent_orchestrator.get_engagement_agent", return_value=engagement),
+            patch("agent_orchestrator.get_monitor_agent", return_value=monitor),
+            patch("agent_orchestrator.get_qualifier_agent", return_value=qualifier),
+        ):
+            result = await AgentOrchestrator().run_full_cycle()
+
+        assert result["status"] == "success"
+        assert result["errors"] == []
+        engagement.run.assert_awaited_once_with([post])
+        monitor.add_monitor.assert_awaited_once()
+        qualifier.run_daily_qualification.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_full_pipeline(self):
-        """Run complete pipeline with all external services mocked."""
+    async def test_errors_keep_pipeline_status_failed(self):
+        discovery = MagicMock()
+        discovery.run = AsyncMock(side_effect=RuntimeError("discovery unavailable"))
+        engagement = MagicMock()
+        engagement.run = AsyncMock()
+        monitor = MagicMock()
+        monitor.run = AsyncMock(
+            return_value={"posts_checked": 0, "replies_requiring_action": []}
+        )
+        qualifier = MagicMock()
+        qualifier.run_daily_qualification = AsyncMock(return_value={"leads_scored": 0})
 
-        # Mock all external dependencies
-        with patch('reddit_client.praw.Reddit') as mock_praw, \
-             patch('nvidia_llm.AsyncOpenAI') as mock_openai, \
-             patch('rag_engine.chromadb.PersistentClient') as mock_chroma:
+        with (
+            patch("agent_orchestrator.get_discovery_agent", return_value=discovery),
+            patch("agent_orchestrator.get_engagement_agent", return_value=engagement),
+            patch("agent_orchestrator.get_monitor_agent", return_value=monitor),
+            patch("agent_orchestrator.get_qualifier_agent", return_value=qualifier),
+        ):
+            result = await AgentOrchestrator().run_full_cycle()
 
-            # Setup Reddit mock
-            mock_reddit_instance = MagicMock()
-            mock_praw.return_value = mock_reddit_instance
-            mock_reddit_instance.user.me.return_value = "testbot"
-
-            mock_submission = MagicMock()
-            mock_submission.id = "abc123"
-            mock_submission.title = "Hit by truck in Orlando"
-            mock_submission.selftext = "Need help, insurance denying claim"
-            mock_submission.score = 25
-            mock_submission.num_comments = 8
-            mock_submission.author = "injured_user"
-            mock_submission.subreddit = "florida"
-            mock_submission.created_utc = datetime.utcnow().timestamp()
-            mock_submission.permalink = "/r/florida/comments/abc123"
-
-            mock_subreddit = MagicMock()
-            mock_subreddit.search.return_value = [mock_submission]
-            mock_reddit_instance.subreddit.return_value = mock_subreddit
-
-            # Setup OpenAI mock
-            mock_chat_response = MagicMock()
-            mock_chat_response.choices = [MagicMock()]
-            mock_chat_response.choices[0].message.content = """
-            {
-                "intent_score": 95,
-                "qualification_score": 90,
-                "lead_temperature": "hot",
-                "accident_type": "truck",
-                "key_phrases": ["insurance denying"],
-                "location_hint": "Orlando",
-                "has_attorney": false,
-                "recommended_action": "urgent",
-                "response_text": "I am sorry to hear about your accident. CaseClosedFL offers a free eligibility check for Florida accident cases. We are not a law firm and this is not legal advice. Visit caseclosedfl.com.",
-                "safety_score": 95,
-                "compliance_flags": [],
-                "includes_disclaimer": true,
-                "is_legal_advice": false,
-                "should_send": true
-            }
-            """
-            mock_chat_response.usage.prompt_tokens = 100
-            mock_chat_response.usage.completion_tokens = 50
-            mock_chat_response.model = "meta/llama-3.3-70b-instruct"
-            mock_chat_response.choices[0].finish_reason = "stop"
-
-            mock_openai_instance = MagicMock()
-            mock_openai_instance.chat.completions.create = AsyncMock(return_value=mock_chat_response)
-            mock_openai.return_value = mock_openai_instance
-
-            # Setup Chroma mock
-            mock_collection = MagicMock()
-            mock_collection.count.return_value = 0
-            mock_collection.add.return_value = None
-            mock_collection.query.return_value = {
-                "ids": [["id1"]],
-                "documents": [["test doc"]],
-                "metadatas": [[{}]],
-                "distances": [[0.1]]
-            }
-
-            mock_chroma_instance = MagicMock()
-            mock_chroma_instance.get_or_create_collection.return_value = mock_collection
-            mock_chroma.return_value = mock_chroma_instance
-
-            # Execute full pipeline
-            from agent_orchestrator import AgentOrchestrator
-            orchestrator = AgentOrchestrator()
-
-            result = await orchestrator.run_full_cycle()
-
-            # Assertions - line by line verification
-            assert result is not None, "Orchestrator returned None"
-            assert "discovery_results" in result, "Missing discovery_results"
-            assert "engagement_results" in result, "Missing engagement_results"
-            assert "monitor_results" in result, "Missing monitor_results"
-            assert "qualifier_results" in result, "Missing qualifier_results"
-            assert result["status"] in ["success", "failed"], "Invalid status"
-
-            print("E2E Pipeline Test PASSED")
-            print(f"  - Discovery: {len(result['discovery_results'].get('high_intent_posts', []))} posts")
-            print(f"  - Status: {result['status']}")
-
-
-# Run instructions:
-# pytest tests/test_e2e.py -v
-# Run 3 times:
-# for i in {1..3}; do echo "=== RUN $i ==="; pytest tests/test_e2e.py -v; done
+        assert result["status"] == "failed"
+        assert result["errors"] == ["discovery: discovery unavailable"]
