@@ -1,99 +1,55 @@
 #!/usr/bin/env python3
-"""
-CaseClosedFL Reddit Agent - Main Entry Point
-Initializes all systems and starts the 24/7 scheduler.
-"""
-import logging
-import sys
+"""Worker entry point. The web process never owns the scheduler."""
 import asyncio
-import warnings
+import logging
+import signal
+import sys
 
 from config import get_settings
+from composio_client import get_composio_client
 from database import init_db
 from rag_engine import get_rag_engine
+from reddit_client import get_reddit_client
 from scheduler import AgentScheduler
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-
-logger = logging.getLogger("main")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+                    handlers=[logging.StreamHandler(sys.stdout)])
+logger = logging.getLogger("worker")
 
 
-async def startup_sequence():
-    """Initialize all systems before starting scheduler."""
-    logger.info("=" * 60)
-    logger.info("CaseClosedFL Reddit Agent - Startup Sequence")
-    logger.info("=" * 60)
-
-    # 1. Database
-    logger.info("[1/4] Initializing database...")
-    init_db()
-    logger.info("    OK Database ready")
-
-    # 2. RAG Knowledge Base
-    logger.info("[2/4] Initializing RAG engine...")
-    rag = get_rag_engine()
-    await rag.initialize_kb()
-    logger.info("    OK RAG KB initialized")
-
-    # 3. Reddit client validation (soft fail - log only)
-    logger.info("[3/4] Validating Reddit API...")
-    try:
-        from reddit_client import get_reddit_client
-        reddit = get_reddit_client()
-        stats = reddit.get_stats()
-        logger.info(f"    OK Reddit client ready (daily: {stats['daily_engagements']}/{stats['daily_limit']})")
-    except Exception as e:
-        logger.warning(f"    Reddit client not ready: {e}. Will retry on first cycle.")
-
-    # 4. Safety guardrails
-    logger.info("[4/4] Loading safety guardrails...")
-    from safety_guardrails import get_guardrails
-    guardrails = get_guardrails()
-    safety_stats = guardrails.get_stats()
-    logger.info(f"    OK Guardrails active (FL Bar: {safety_stats['florida_bar_compliant']})")
-
-    logger.info("=" * 60)
-    logger.info("All systems operational. Starting 24/7 scheduler...")
-    logger.info("=" * 60)
+async def validate_reddit_transport(settings) -> None:
+    """Fail startup when the selected Reddit provider is unavailable or incompatible."""
+    if settings.reddit_transport == "composio":
+        # Fail the worker rather than silently processing no Reddit data when
+        # the configured Composio connection or action contract is unavailable.
+        if settings.app_env.lower() == "staging":
+            contract = await get_reddit_client().validate_read_only_contract()
+            logger.info(
+                "Validated read-only Reddit staging contract: account=%s action=%s posts_checked=%s",
+                contract["connected_account_id"],
+                contract["action"],
+                contract["posts_checked"],
+            )
+        else:
+            await get_composio_client().get_connected_account()
 
 
-def main():
-    """Main entry point."""
+async def main():
     settings = get_settings()
-
-    # Soft warnings for missing credentials (no hard exits)
-    if not settings.reddit_client_id or settings.reddit_client_id == "your_reddit_client_id":
-        logger.warning("REDDIT_CLIENT_ID not configured. Agent will run in monitoring-only mode.")
-    if not settings.nvidia_api_key or settings.nvidia_api_key == "nvapi-your-nvidia-key":
-        logger.warning("NVIDIA_API_KEY not configured. LLM features disabled.")
-
-    # Run startup
-    asyncio.run(startup_sequence())
-
-    # Start scheduler (blocks forever)
+    init_db()
+    await get_rag_engine().initialize_kb()
+    await validate_reddit_transport(settings)
     scheduler = AgentScheduler()
     scheduler.start()
-
-    # Keep main thread alive with proper event loop handling
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # If APScheduler already started the loop, just block
-            import time
-            while True:
-                time.sleep(1)
-        else:
-            loop.run_forever()
-    except KeyboardInterrupt:
-        logger.info("Shutdown signal received...")
-        scheduler.shutdown()
-        logger.info("Agent stopped gracefully")
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, stop.set)
+    logger.info("Worker started; Reddit transport=%s auto_reply=%s", settings.reddit_transport, settings.enable_auto_reply)
+    await stop.wait()
+    scheduler.shutdown()
+    logger.info("Worker stopped")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
