@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: caseclosed-agent
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./chroma_db:/app/chroma_db
+      - ./agent.log:/app/agent.log
+    command: uvicorn api:app --host 0.0.0.0 --port 8000 --workers 1
+
+  worker:
+    build: .
+    container_name: caseclosed-worker
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./chroma_db:/app/chroma_db
+    command: python run.py
+
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: caseclosed-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: caseclosed
+      POSTGRES_PASSWORD: caseclosed_secret_2026
+      POSTGRES_DB: caseclosed_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: caseclosed-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  postgres_data:
+  redis_data:
