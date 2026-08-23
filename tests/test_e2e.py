@@ -160,7 +160,14 @@ def test_api_operator_protection_and_health():
     with TestClient(app) as client:
         assert client.get("/").status_code == 401
         assert client.get("/api/health").status_code == 200
-        assert client.get("/", headers={"X-Operator-Key": "test-operator-key"}).status_code == 200
+        headers = {"X-Operator-Key": "test-operator-key"}
+        dashboard = client.get("/", headers=headers)
+        assert dashboard.status_code == 200
+        assert "data.message || data.detail" in dashboard.text
+
+        toggle = client.post("/api/toggle-auto-reply", headers=headers)
+        assert toggle.status_code == 409
+        assert "Automation cannot be toggled at runtime" in toggle.json()["detail"]
 
 
 def test_compose_does_not_expose_database_or_redis_ports():
