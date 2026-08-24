@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Operator Access · CaseClosedFL</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <main class="container">
+        <section class="card controls">
+            <h1>CaseClosedFL Operator Access</h1>
+            <p>Enter the operator key to open the autonomous outreach controls.</p>
+            <label for="operator-key">Operator key</label>
+            <input id="operator-key" type="password" autocomplete="current-password" required>
+            <div class="button-group">
+                <button id="sign-in" class="btn btn-primary">Open Control Center</button>
+            </div>
+            <p id="access-message" role="alert"></p>
+        </section>
+    </main>
+    <script>
+        const keyInput = document.getElementById('operator-key');
+        const message = document.getElementById('access-message');
+        async function signIn() {
+            const key = keyInput.value;
+            const response = await fetch('/api/operator-session', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {'X-Operator-Key': key},
+            });
+            const data = await response.json();
+            if (response.ok) {
+                keyInput.value = '';
+                window.location.assign('/');
+                return;
+            }
+            message.textContent = data.detail || 'Operator authentication failed.';
+        }
+        document.getElementById('sign-in').addEventListener('click', signIn);
+        keyInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') signIn();
+        });
+    </script>
+</body>
+</html>

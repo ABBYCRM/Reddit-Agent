@@ -1,0 +1,3 @@
+- [DigitalOcean private App Platform networking](digitalocean-private-app-network.md) — NYC private DB access needs an app VPC, peering, and a narrowly scoped firewall CIDR.
+- [Custom workflow ports](custom-workflow-ports.md) — use a literal supported port in workflow commands; `$PORT` can be empty during command interpolation.
+- [Reddit autonomy provider readiness](reddit-autonomy-provider-readiness.md) — full ON requires live comment and DM actions; the current Composio catalog lacks DMs, so autonomy remains fail-closed.
