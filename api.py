@@ -10,12 +10,14 @@ from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, s
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from agent_orchestrator import get_orchestrator
 from config import get_settings
 from database import AgentRun, Engagement, Lead, engine, get_db, init_db
+from nvidia_llm import get_nvidia_client
 from rag_engine import get_rag_engine
 from reddit_client import get_reddit_client
 from safety_guardrails import get_guardrails
@@ -88,6 +90,18 @@ async def get_engagements(db: Session = Depends(get_db)):
 async def trigger_discovery(background_tasks: BackgroundTasks):
     background_tasks.add_task(get_orchestrator().run_full_cycle)
     return {"status": "accepted", "message": "Discovery and drafting cycle queued; outbound replies remain opt-in."}
+
+
+class AgentQueryRequest(BaseModel):
+    query: str
+
+
+@app.post("/api/reddit-agent/run", dependencies=[Depends(require_operator)])
+async def run_reddit_agent(req: AgentQueryRequest):
+    result = await get_nvidia_client().run_query(req.query)
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="NVIDIA API request failed or is not configured")
+    return {"result": result, "status": "success"}
 
 
 @app.post("/api/toggle-auto-reply", dependencies=[Depends(require_operator)])

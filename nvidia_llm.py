@@ -100,6 +100,25 @@ class NVIDIAClient:
             result["safety_score"] = 0
         return result
 
+    async def run_query(self, query: str) -> Optional[str]:
+        if not self.client:
+            return None
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a Reddit Agent specialized in scraping and analysis. Respond strictly to the user's request based on current Reddit trends."},
+                    {"role": "user", "content": query},
+                ],
+                temperature=0.7, top_p=0.95, max_tokens=1024,
+            )
+            self._request_count += 1
+            return response.choices[0].message.content
+        except Exception as exc:
+            self._error_count += 1
+            logger.warning("NVIDIA query failed: %s", exc)
+            return None
+
     async def generate_search_queries(self, topics: List[str]) -> List[str]:
         parsed = await self._json(
             [{"role": "system", "content": "Return JSON only with a 'queries' array of up to 10 neutral Reddit search terms."},
