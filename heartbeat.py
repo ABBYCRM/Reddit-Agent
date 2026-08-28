@@ -4,7 +4,7 @@ Tracks system health, Reddit API status, and agent vitals.
 """
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Dict, Any
 
 from config import get_settings

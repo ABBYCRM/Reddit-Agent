@@ -4,12 +4,12 @@ Watches engaged posts for replies, upvotes, and DMs.
 Triggers follow-up actions and lead qualification.
 """
 import logging
-from typing import Dict, Any, List
-from datetime import datetime, timedelta
+from typing import Dict, Any
+from datetime import datetime
 
 from config import get_settings
 from reddit_client import get_reddit_client
-from database import get_db_session, Engagement, MonitoredPost, Lead, AgentRun
+from database import get_db_session, MonitoredPost
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

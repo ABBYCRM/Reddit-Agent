@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 
 from config import get_settings
-from database import get_db_session, Lead, Engagement, AgentRun
+from database import get_db_session, Lead
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -62,13 +62,13 @@ class QualifierAgent:
         contact = {}
 
         # Email pattern
-        email_pattern = r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}'
+        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
         emails = re.findall(email_pattern, text)
         if emails:
             contact["email"] = emails[0]
 
         # Phone pattern (US)
-        phone_pattern = r'\d{3}[-.]?\d{3}[-.]?\d{4}'
+        phone_pattern = r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b'
         phones = re.findall(phone_pattern, text)
         if phones:
             contact["phone"] = phones[0]

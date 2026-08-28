@@ -5,11 +5,19 @@ Supports chat completion, embeddings, and structured output.
 """
 import json
 import logging
-from typing import List, Dict, Any, Optional, AsyncGenerator
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 
-from openai import AsyncOpenAI
-from tenacity import retry, stop_after_attempt, wait_exponential
+from openai import AsyncOpenAI, APIStatusError
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """Only retry errors that could plausibly succeed next attempt.
+    4xx statuses (bad key 401, removed model 410, bad request 400...) won't."""
+    if isinstance(exc, APIStatusError):
+        return exc.status_code >= 500 or exc.status_code == 429
+    return True
 
 from config import get_settings
 
@@ -35,18 +43,29 @@ class NVIDIAClient:
     """
 
     def __init__(self):
-        self.client = AsyncOpenAI(
-            base_url=settings.nvidia_base_url,
-            api_key=settings.nvidia_api_key,
-        )
+        self._client = None
         self.model = settings.nvidia_model
         self.embedding_model = settings.nvidia_embedding_model
         self._request_count = 0
         self._error_count = 0
 
+    @property
+    def client(self) -> AsyncOpenAI:
+        """Lazily construct the HTTP client so tests can patch AsyncOpenAI
+        and so a missing key only fails at the first real API call."""
+        if self._client is None:
+            self._client = AsyncOpenAI(
+                base_url=settings.nvidia_base_url,
+                # Placeholder keeps client constructible without a key; calls
+                # fail fast at the provider boundary with a clear auth error.
+                api_key=settings.nvidia_api_key or "missing-nvidia-api-key",
+            )
+        return self._client
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception(_is_transient),
     )
     async def chat(
         self,
@@ -103,6 +122,7 @@ class NVIDIAClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception(_is_transient),
     )
     async def embed(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings for texts using NVIDIA embedding model."""

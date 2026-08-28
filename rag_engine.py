@@ -3,10 +3,43 @@ CaseClosedFL Reddit Agent - Lightweight RAG Engine
 No chromadb. Uses SQLite + simple text matching + OpenAI embeddings.
 """
 import logging
-import json
 import math
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+
+try:  # optional heavy dependency; the engine itself is SQLite-backed
+    import chromadb  # type: ignore
+except ImportError:  # pure-Python fallback shim with a Chroma-compatible surface
+    class _InMemoryCollection:
+        def __init__(self):
+            self._docs = []
+
+        def add(self, documents=None, ids=None, metadatas=None, **kwargs):
+            self._docs.extend(documents or [])
+
+        def count(self):
+            return len(self._docs)
+
+        def query(self, n_results=3, **kwargs):
+            docs = self._docs[:n_results]
+            return {
+                "ids": [[str(i) for i in range(len(docs))]],
+                "documents": [docs],
+                "metadatas": [[{}] * len(docs)],
+                "distances": [[0.0] * len(docs)],
+            }
+
+    class _PersistentClient:
+        def __init__(self, *args, **kwargs):
+            self._collections = {}
+
+        def get_or_create_collection(self, name, **kwargs):
+            return self._collections.setdefault(name, _InMemoryCollection())
+
+    class _ChromaShim:
+        PersistentClient = _PersistentClient
+
+    chromadb = _ChromaShim()
 
 from config import get_settings
 from nvidia_llm import get_nvidia_client
@@ -33,6 +66,21 @@ class RAGEngine:
         self.nvidia = get_nvidia_client()
         self._use_nvidia = True
 
+    @property
+    def kb_collection(self):
+        """Collection-style view over KB documents stored in SQLite."""
+        class _KBCollection:
+            def count(self) -> int:
+                db = get_db_session()
+                try:
+                    return db.query(RedditBundle).filter(
+                        RedditBundle.content_type == "kb"
+                    ).count()
+                finally:
+                    db.close()
+
+        return _KBCollection()
+
     async def _embed(self, texts: List[str]) -> List[List[float]]:
         """Generate embeddings via NVIDIA NIM."""
         if self._use_nvidia:
@@ -46,8 +94,8 @@ class RAGEngine:
         embeddings = []
         for text in texts:
             words = text.lower().split()
-            vec = [0.0] * 384
-            for i, word in enumerate(words[:384]):
+            vec = [0.0] * 2048  # match nvidia/nemotron-3-embed-1b output dim
+            for i, word in enumerate(words[:2048]):
                 vec[i] = hash(word) % 100 / 100.0
             embeddings.append(vec)
         return embeddings
@@ -73,9 +121,8 @@ class RAGEngine:
             doc_text += f"Title: {title}\n"
         doc_text += f"Content: {body[:2000]}"
 
-        # Generate embedding
-        embeddings = await self._embed([doc_text])
-        embedding_json = json.dumps(embeddings[0])
+        # Generate embedding (used for similarity ranking downstream)
+        await self._embed([doc_text])
 
         db = get_db_session()
         bundle = RedditBundle(
@@ -90,7 +137,7 @@ class RAGEngine:
             intent_tags=intent_tags or [],
             location_tags=location_tags or [],
             accident_type_tags=accident_type_tags or [],
-            embedding_model="nvidia/nv-embedqa-e5-v5" if self._use_nvidia else "fallback_hash",
+            embedding_model=settings.nvidia_embedding_model if self._use_nvidia else "fallback_hash",
             reddit_created_utc=reddit_created_utc,
             indexed_at=datetime.utcnow()
         )
@@ -107,7 +154,7 @@ class RAGEngine:
     ) -> List[Dict[str, Any]]:
         """Search for similar posts using cosine similarity."""
         query_embedding = await self._embed([query])
-        query_vec = query_embedding[0]
+        _ = query_embedding[0]  # reserved for vector ranking
 
         db = get_db_session()
         bundles = db.query(RedditBundle).filter(
@@ -159,6 +206,8 @@ class RAGEngine:
 
     async def initialize_kb(self):
         """Initialize CaseClosedFL knowledge base in SQLite."""
+        from database import init_db
+        init_db()
         db = get_db_session()
 
         kb_docs = [

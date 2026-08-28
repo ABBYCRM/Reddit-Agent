@@ -4,7 +4,7 @@ Autonomously searches Reddit for high-intent personal injury posts.
 Uses search queries, subreddit monitoring, and LLM scoring.
 """
 import logging
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
 
 from config import get_settings
@@ -12,10 +12,18 @@ from reddit_client import get_reddit_client
 from nvidia_llm import get_nvidia_client
 from rag_engine import get_rag_engine
 from safety_guardrails import get_guardrails
-from database import get_db_session, RedditBundle, AgentRun
+from database import get_db_session, AgentRun
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+async def _maybe_await(value):
+    """Await coroutines; pass through plain values (e.g. sync mocks/fakes)."""
+    import inspect
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 class DiscoveryAgent:
@@ -84,12 +92,12 @@ class DiscoveryAgent:
             }
 
             # Step 1: Generate dynamic queries
-            queries = await self.llm.generate_search_queries([
+            queries = await _maybe_await(self.llm.generate_search_queries([
                 "Florida car accident",
                 "personal injury help",
                 "insurance problems",
                 "accident lawyer questions"
-            ])
+            ]))
             queries = list(set(queries + self.BASE_QUERIES))[:20]
             logger.info(f"Using {len(queries)} search queries")
 
@@ -144,16 +152,16 @@ class DiscoveryAgent:
                         continue
 
                     # LLM intent analysis
-                    analysis = await self.llm.analyze_post_intent(
+                    analysis = await _maybe_await(self.llm.analyze_post_intent(
                         post_title=post.title,
                         post_body=post.selftext or "",
                         subreddit=str(post.subreddit)
-                    )
+                    ))
 
                     results["posts_scored"] += 1
 
                     # Index into RAG regardless of score
-                    await self.rag.add_reddit_post(
+                    await _maybe_await(self.rag.add_reddit_post(
                         reddit_id=post.id,
                         subreddit=str(post.subreddit),
                         content_type="post",
@@ -166,7 +174,7 @@ class DiscoveryAgent:
                         location_tags=[analysis.get("location_hint")] if analysis.get("location_hint") else [],
                         accident_type_tags=[analysis.get("accident_type")] if analysis.get("accident_type") else [],
                         reddit_created_utc=datetime.utcfromtimestamp(post.created_utc)
-                    )
+                    ))
                     results["posts_indexed"] += 1
 
                     # Track high-intent posts

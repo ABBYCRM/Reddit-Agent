@@ -4,13 +4,12 @@ Run 3x line-by-line verification as required.
 Tests full agent pipeline without external API calls (mocked).
 """
 import pytest
-import asyncio
+import time
 from datetime import datetime
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 
 # Import all modules for testing
-from config import Settings
-from database import Lead, Engagement, MonitoredPost, RedditBundle, AgentRun
+from database import Lead, Engagement
 from safety_guardrails import SafetyGuardrails, SafetyCheck
 from reddit_client import RedditRateLimiter
 
@@ -21,14 +20,14 @@ class TestRateLimiter:
     def test_token_refill(self):
         limiter = RedditRateLimiter(max_qpm=60, burst_buffer=5)
         limiter.tokens = 0
-        limiter.last_update = datetime.utcnow().timestamp() - 60
+        limiter.last_update = time.time() - 60
         limiter._refill_tokens()
         assert limiter.tokens == 60  # Full refill after 60 seconds
 
     def test_acquire_consumes_tokens(self):
         limiter = RedditRateLimiter(max_qpm=60, burst_buffer=5)
         limiter.tokens = 10
-        limiter.last_update = datetime.utcnow().timestamp()
+        limiter.last_update = time.time()
         result = limiter.acquire(tokens=1)
         assert result is True
         assert limiter.tokens == 9
@@ -159,9 +158,9 @@ class TestDiscoveryAgent:
     async def test_run_with_mocks(self):
         with patch('discovery_agent.get_reddit_client') as mock_reddit, \
              patch('discovery_agent.get_nvidia_client') as mock_llm, \
-             patch('discovery_agent.get_rag_engine') as mock_rag, \
+             patch('discovery_agent.get_rag_engine') as _, \
              patch('discovery_agent.get_guardrails') as mock_guard, \
-             patch('discovery_agent.get_db_session') as mock_db:
+             patch('discovery_agent.get_db_session') as _:
 
             # Setup mocks
             mock_post = Mock()
@@ -260,7 +259,7 @@ class TestEndToEndPipeline:
             """
             mock_chat_response.usage.prompt_tokens = 100
             mock_chat_response.usage.completion_tokens = 50
-            mock_chat_response.model = "meta/llama-3.3-70b-instruct"
+            mock_chat_response.model = "meta/llama-3.2-11b-vision-instruct"
             mock_chat_response.choices[0].finish_reason = "stop"
 
             mock_openai_instance = MagicMock()

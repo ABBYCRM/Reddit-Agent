@@ -3,7 +3,6 @@ CaseClosedFL Reddit Agent - Scheduler
 APScheduler for cron-like execution of agent cycles.
 """
 import logging
-import asyncio
 from typing import Dict, Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -127,7 +126,6 @@ class AgentScheduler:
         """Daily cleanup tasks."""
         logger.info("Running daily cleanup...")
         # Archive old data, reset counters, etc.
-        pass
 
     def start(self):
         """Start the scheduler."""

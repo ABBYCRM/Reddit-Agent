@@ -38,24 +38,24 @@ class SafetyGuardrails:
 
     # Patterns that indicate user already has an attorney
     HAS_ATTORNEY_PATTERNS = [
-        r"my attorney", r"my lawyer", r"represented by",
-        r"legal counsel", r"hired a lawyer", r"hired an attorney",
-        r"retained.*(lawyer|attorney)", r"my firm",
-        r"speaking with my attorney", r"my legal team"
+        r"\bmy attorney\b", r"\bmy lawyer\b", r"\brepresented by\b",
+        r"\blegal counsel\b", r"\bhired a lawyer\b", r"\bhired an attorney\b",
+        r"\bretained\b.*\b(lawyer|attorney)\b", r"\bmy firm\b",
+        r"\bspeaking with my attorney\b", r"\bmy legal team\b"
     ]
 
     # Patterns that indicate this is a legal advice request (not for us)
     LEGAL_ADVICE_PATTERNS = [
-        r"should I sue", r"can I sue", r"do I have a case",
-        r"what are my rights", r"what should I do legally",
-        r"is this illegal", r"can they do this legally"
+        r"\bshould I sue\b", r"\bcan I sue\b", r"\bdo I have a case\b",
+        r"\bwhat are my rights\b", r"\bwhat should I do legally\b",
+        r"\bis this illegal\b", r"\bcan they do this legally\b"
     ]
 
     # Spam / low quality indicators
     SPAM_PATTERNS = [
-        r"click here", r"DM me", r"message me",
-        r"free consultation.*now", r"limited time",
-        r"act now", r"guaranteed.*win", r"millions"
+        r"\bclick here\b", r"\bDM me\b", r"\bmessage me\b",
+        r"\bfree consultation\b.*\bnow\b", r"\blimited time\b",
+        r"\bact now\b", r"\bguaranteed\b.*\bwin\b", r"\bmillions\b"
     ]
 
     # Subreddits we should NEVER post in (protected communities)
@@ -238,10 +238,10 @@ class SafetyGuardrails:
 
         # 2. No legal advice claims
         legal_advice_claims = [
-            r"you should.*(sue|file|claim)",
-            r"you have a case", r"you will win",
-            r"you are entitled to.*\$",
-            r"your case is worth"
+            r"\byou should\b.*\b(sue|file|claim)\b",
+            r"\byou have a case\b", r"\byou will win\b",
+            r"\byou are entitled to\b.*\$",
+            r"\byour case is worth\b"
         ]
         gives_advice = any(re.search(p, text_lower) for p in legal_advice_claims)
         if gives_advice:

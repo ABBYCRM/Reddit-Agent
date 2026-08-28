@@ -7,7 +7,7 @@ import time
 import random
 import logging
 from datetime import datetime, timedelta
-from typing import Iterator, List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 from dataclasses import dataclass
 
 import praw
@@ -51,12 +51,12 @@ class RedditRateLimiter:
     def _refill_tokens(self):
         now = time.time()
         elapsed = now - self.last_update
-        # Refill based on per-minute rate
-        self.tokens = min(
-            self.max_qpm,
-            self.tokens + (elapsed * self.max_qpm / 60.0)
-        )
-        self.last_update = now
+        # Refill whole tokens only; fractional time carries over so the
+        # bucket stays exact and deterministic.
+        whole_tokens = int(elapsed * self.max_qpm / 60.0)
+        if whole_tokens > 0:
+            self.tokens = min(self.max_qpm, self.tokens + whole_tokens)
+            self.last_update += whole_tokens * 60.0 / self.max_qpm
 
     def acquire(self, tokens: int = 1) -> bool:
         """Attempt to acquire tokens. Blocks if necessary."""

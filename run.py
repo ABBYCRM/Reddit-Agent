@@ -6,7 +6,6 @@ Initializes all systems and starts the 24/7 scheduler.
 import logging
 import sys
 import asyncio
-import warnings
 
 from config import get_settings
 from database import init_db

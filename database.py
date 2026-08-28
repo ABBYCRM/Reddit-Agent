@@ -3,10 +3,9 @@ CaseClosedFL Reddit Agent - Database Layer
 SQLite/PostgreSQL compatible with SQLAlchemy 2.0
 """
 from datetime import datetime
-from typing import Optional, List
 from sqlalchemy import (
     create_engine, Column, Integer, String, Text, DateTime, 
-    Float, Boolean, ForeignKey, JSON, Index, func
+    Float, Boolean, ForeignKey, JSON, Index
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 import uuid
@@ -17,6 +16,13 @@ settings = get_settings()
 
 # Detect database type
 is_sqlite = settings.database_url.startswith("sqlite")
+
+# Ensure the SQLite parent directory exists before connecting
+if is_sqlite:
+    from pathlib import Path
+    _db_path = settings.database_url.split("///", 1)[-1]
+    if _db_path not in (":memory:", ""):
+        Path(_db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
 # Engine with connection pooling
 engine = create_engine(

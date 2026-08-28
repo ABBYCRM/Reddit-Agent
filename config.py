@@ -2,7 +2,7 @@
 CaseClosedFL Reddit Agent - Configuration
 Centralized settings with Pydantic Settings v2
 """
-import os
+from functools import lru_cache
 from typing import List, Optional
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
@@ -15,10 +15,11 @@ class Settings(BaseSettings):
     app_env: str = Field(default="development", alias="APP_ENV")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     secret_key: str = Field(default="dev-secret", alias="SECRET_KEY")
+    operator_api_key: Optional[str] = Field(default=None, alias="OPERATOR_API_KEY")
 
-    # Reddit API
-    reddit_client_id: str = Field(alias="REDDIT_CLIENT_ID")
-    reddit_client_secret: str = Field(alias="REDDIT_CLIENT_SECRET")
+    # Reddit API (optional local-only PRAW fallback; Composio is the default transport)
+    reddit_client_id: Optional[str] = Field(default=None, alias="REDDIT_CLIENT_ID")
+    reddit_client_secret: Optional[str] = Field(default=None, alias="REDDIT_CLIENT_SECRET")
     reddit_user_agent: str = Field(
         default="caseclosedfl-agent/1.0 (by /u/caseclosedfl)",
         alias="REDDIT_USER_AGENT"
@@ -29,17 +30,17 @@ class Settings(BaseSettings):
     reddit_burst_buffer: int = Field(default=5, alias="REDDIT_BURST_BUFFER")
 
     # NVIDIA NIM
-    nvidia_api_key: str = Field(alias="NVIDIA_API_KEY")
+    nvidia_api_key: Optional[str] = Field(default=None, alias="NVIDIA_API_KEY")
     nvidia_base_url: str = Field(
         default="https://integrate.api.nvidia.com/v1",
         alias="NVIDIA_BASE_URL"
     )
     nvidia_model: str = Field(
-        default="meta/llama-3.3-70b-instruct",
+        default="meta/llama-3.2-11b-vision-instruct",
         alias="NVIDIA_MODEL"
     )
     nvidia_embedding_model: str = Field(
-        default="nvidia/nv-embedqa-e5-v5",
+        default="nvidia/nemotron-3-embed-1b",
         alias="NVIDIA_EMBEDDING_MODEL"
     )
 
@@ -48,7 +49,7 @@ class Settings(BaseSettings):
 
     # Database
     database_url: str = Field(
-        default="postgresql://user:pass@localhost:5432/caseclosed_agent",
+        default="sqlite:///./data/caseclosed_agent.db",
         alias="DATABASE_URL"
     )
     redis_url: Optional[str] = Field(default=None, alias="REDIS_URL")
@@ -64,13 +65,13 @@ class Settings(BaseSettings):
     florida_bar_compliant: bool = Field(default=True, alias="FLORIDA_BAR_COMPLIANT")
 
     # Targeting
-    target_states: str = Field(default="Florida", alias="TARGET_STATES")
-    target_cities: str = Field(
-        default="Miami,Orlando,Tampa,Jacksonville,Fort Lauderdale,West Palm Beach",
+    target_states: List[str] = Field(default=["Florida"], alias="TARGET_STATES")
+    target_cities: List[str] = Field(
+        default=["Miami", "Orlando", "Tampa", "Jacksonville", "Fort Lauderdale", "West Palm Beach"],
         alias="TARGET_CITIES"
     )
-    target_subreddits: str = Field(
-        default="legaladvice,florida,Miami,Orlando,tampa,insurance,personalfinance,caraccidents",
+    target_subreddits: List[str] = Field(
+        default=["legaladvice", "florida", "Miami", "Orlando", "tampa", "insurance", "personalfinance", "caraccidents"],
         alias="TARGET_SUBREDDITS"
     )
 
@@ -93,15 +94,15 @@ class Settings(BaseSettings):
 
     @property
     def target_states_list(self) -> List[str]:
-        return self.target_states if isinstance(self.target_states, list) else [self.target_states]
+        return list(self.target_states)
 
     @property
     def target_cities_list(self) -> List[str]:
-        return self.target_cities if isinstance(self.target_cities, list) else [self.target_cities]
+        return list(self.target_cities)
 
     @property
     def target_subreddits_list(self) -> List[str]:
-        return self.target_subreddits if isinstance(self.target_subreddits, list) else [self.target_subreddits]
+        return list(self.target_subreddits)
 
     class Config:
         env_file = ".env"
@@ -109,12 +110,6 @@ class Settings(BaseSettings):
         extra = "ignore"
 
 
-# Singleton instance
-_settings: Optional[Settings] = None
-
-
+@lru_cache
 def get_settings() -> Settings:
-    global _settings
-    if _settings is None:
-        _settings = Settings()
-    return _settings
+    return Settings()

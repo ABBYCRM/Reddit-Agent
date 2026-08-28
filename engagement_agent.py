@@ -11,8 +11,8 @@ from config import get_settings
 from reddit_client import get_reddit_client
 from nvidia_llm import get_nvidia_client
 from rag_engine import get_rag_engine
-from safety_guardrails import get_guardrails, SafetyCheck
-from database import get_db_session, Engagement, Lead, AgentRun
+from safety_guardrails import get_guardrails
+from database import get_db_session, Engagement, Lead
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

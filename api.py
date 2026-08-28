@@ -1,21 +1,22 @@
 """
 CaseClosedFL Reddit Agent - FastAPI Web UI
-Control dashboard for monitoring and managing the agent.
+Operator-only control dashboard for monitoring and managing the agent.
+The scheduler runs in the separate worker process (python run.py).
 """
 import logging
+import secrets
+from contextlib import asynccontextmanager
 from typing import Optional
 from datetime import datetime
 
-from fastapi import FastAPI, Request, Depends, BackgroundTasks
+from fastapi import FastAPI, Request, Depends, BackgroundTasks, HTTPException, status
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from config import get_settings
-from database import get_db, init_db, Lead, Engagement, AgentRun, RedditBundle
-from scheduler import AgentScheduler
-from agent_orchestrator import get_orchestrator
+from database import get_db, init_db, Lead, Engagement, AgentRun
 from reddit_client import get_reddit_client
 from rag_engine import get_rag_engine
 from safety_guardrails import get_guardrails
@@ -23,35 +24,39 @@ from safety_guardrails import get_guardrails
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+
+def require_operator(request: Request) -> None:
+    """Constant-time check of the operator API key on protected routes."""
+    expected = settings.operator_api_key
+    provided = request.headers.get("X-Operator-Key", "")
+    if not expected or not secrets.compare_digest(provided, expected):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Operator authentication required",
+        )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize database and services on startup."""
+    init_db()
+    await get_rag_engine().initialize_kb()
+    logger.info("Agent API started; scheduler is owned by the worker process")
+    yield
+
+
 # Initialize FastAPI
-app = FastAPI(title="CaseClosedFL Agent Control Center")
+app = FastAPI(title="CaseClosedFL Agent Control Center", lifespan=lifespan)
 
 # Templates and static files
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Global scheduler instance
-scheduler: Optional[AgentScheduler] = None
+# Scheduler runs in the worker process; the web surface only reports status.
+scheduler = None
 
 
-@app.on_event("startup")
-async def startup():
-    """Initialize database and services on startup."""
-    init_db()
-    global scheduler
-    scheduler = AgentScheduler()
-    scheduler.start()
-    logger.info("Agent API started")
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    """Graceful shutdown."""
-    if scheduler:
-        scheduler.shutdown()
-
-
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_operator)])
 async def dashboard(request: Request, db: Session = Depends(get_db)):
     """Main control dashboard."""
     # Stats
@@ -70,8 +75,8 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     # RAG stats
     rag_stats = get_rag_engine().get_stats()
 
-    # Scheduler status
-    sched_status = scheduler.get_status() if scheduler else {}
+    # Scheduler runs in the worker process; report ownership only.
+    sched_status = {"running": "worker process", "jobs": []}
 
     return templates.TemplateResponse("dashboard.html", {
         "request": request,
@@ -95,7 +100,7 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
     })
 
 
-@app.get("/api/leads")
+@app.get("/api/leads", dependencies=[Depends(require_operator)])
 async def get_leads(status: Optional[str] = None, db: Session = Depends(get_db)):
     """API endpoint for leads."""
     query = db.query(Lead)
@@ -120,7 +125,7 @@ async def get_leads(status: Optional[str] = None, db: Session = Depends(get_db))
     }
 
 
-@app.get("/api/engagements")
+@app.get("/api/engagements", dependencies=[Depends(require_operator)])
 async def get_engagements(db: Session = Depends(get_db)):
     """API endpoint for engagements."""
     engagements = db.query(Engagement).order_by(Engagement.created_at.desc()).limit(100).all()
@@ -139,16 +144,22 @@ async def get_engagements(db: Session = Depends(get_db)):
     }
 
 
-@app.post("/api/trigger-discovery")
+@app.post("/api/trigger-discovery", dependencies=[Depends(require_operator)])
 async def trigger_discovery(background_tasks: BackgroundTasks):
-    """Manually trigger a discovery cycle."""
-    if scheduler:
-        background_tasks.add_task(scheduler._run_discovery_cycle)
-        return {"status": "triggered", "message": "Discovery cycle started"}
-    return {"status": "error", "message": "Scheduler not running"}
+    """Manually trigger a discovery cycle in the background."""
+    from discovery_agent import DiscoveryAgent
+
+    async def _run_safe():
+        try:
+            await DiscoveryAgent().run()
+        except Exception:
+            logger.exception("Manual discovery cycle failed")
+
+    background_tasks.add_task(_run_safe)
+    return {"status": "triggered", "message": "Discovery cycle started"}
 
 
-@app.post("/api/toggle-auto-reply")
+@app.post("/api/toggle-auto-reply", dependencies=[Depends(require_operator)])
 async def toggle_auto_reply():
     """Toggle auto-reply setting."""
     # In production, update database config; here we just return status

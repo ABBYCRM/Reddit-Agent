@@ -4,9 +4,7 @@ Uses Composio's managed OAuth for Reddit instead of raw PRAW credentials.
 Falls back to PRAW if Composio is unavailable.
 """
 import logging
-import json
 from typing import List, Dict, Any, Optional
-from datetime import datetime
 
 import requests
 
@@ -79,7 +77,7 @@ class ComposioRedditClient:
         if not entity:
             return []
 
-        result = self._request("POST", f"/actions/REDDIT_SEARCH_SUBREDDIT/execute", {
+        result = self._request("POST", "/actions/REDDIT_SEARCH_SUBREDDIT/execute", {
             "connectedAccountId": entity,
             "data": {
                 "subreddit": subreddit,
@@ -99,7 +97,7 @@ class ComposioRedditClient:
         if not entity:
             return []
 
-        result = self._request("POST", f"/actions/REDDIT_GET_HOT_POSTS/execute", {
+        result = self._request("POST", "/actions/REDDIT_GET_HOT_POSTS/execute", {
             "connectedAccountId": entity,
             "data": {
                 "subreddit": subreddit,
@@ -115,7 +113,7 @@ class ComposioRedditClient:
         if not entity:
             return None
 
-        result = self._request("POST", f"/actions/REDDIT_SUBMIT_COMMENT/execute", {
+        result = self._request("POST", "/actions/REDDIT_SUBMIT_COMMENT/execute", {
             "connectedAccountId": entity,
             "data": {
                 "submission_id": submission_id,
@@ -131,7 +129,7 @@ class ComposioRedditClient:
         if not entity:
             return False
 
-        result = self._request("POST", f"/actions/REDDIT_SEND_MESSAGE/execute", {
+        result = self._request("POST", "/actions/REDDIT_SEND_MESSAGE/execute", {
             "connectedAccountId": entity,
             "data": {
                 "recipient": username,
