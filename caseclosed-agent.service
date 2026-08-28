@@ -1,0 +1,15 @@
+[Unit]
+Description=CaseClosedFL Reddit Agent
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/caseclosed-agent
+Environment=PATH=/opt/caseclosed-agent/venv/bin
+ExecStart=/opt/caseclosed-agent/venv/bin/python run.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
